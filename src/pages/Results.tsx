@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -161,7 +161,8 @@ const Results = () => {
   const [selectedContact, setSelectedContact] = useState<string | null>(null);
   const [messageData, setMessageData] = useState({ subject: "", body: "" });
   const [runStatus, setRunStatus] = useState<RunPhase>("loading");
-  const [isPolling, setIsPolling] = useState(false);
+
+  const abortRef = useRef<AbortController | null>(null);
 
   const runId = searchParams.get("run_id") || "";
   const role = searchParams.get("role") || "";
@@ -181,116 +182,166 @@ const Results = () => {
       url: r.link ?? undefined,
     }));
 
-  // Poll for results with simple GET (no custom headers)
-  const pollResults = async () => {
-    if (!runId || isPolling) return;
-
-    // Demo fallback if the Home page flagged CORS failure
+  // One-shot fetch with semantics: returns { payload, phase, retryAfterMs }
+  async function fetchResultsOnce(signal?: AbortSignal): Promise<{
+    payload: N8nResultsPayload | null;
+    phase: RunPhase;
+    retryAfterMs?: number;
+  }> {
+    // Demo mode
     if (isDemo) {
-      setRunStatus("running");
-      setTimeout(() => {
-        const mockJobs: Job[] = [
-          {
-            id: "1",
-            title: "Senior Power BI Developer",
-            company: "TechCorp Inc.",
-            location: "Minneapolis, MN",
-            salary: "$95,000 - $120,000",
-            datePosted: "2025-03-28",
-            source: "Company Site",
-            url: "https://example.com/job/1",
-          },
-          {
-            id: "2",
-            title: "Business Intelligence Analyst",
-            company: "DataFlow Solutions",
-            location: "Remote",
-            salary: "$80,000 - $100,000",
-            datePosted: "2025-03-24",
-            source: "Job Board",
-            url: "https://example.com/job/2",
-          },
-        ];
-        setJobs(mockJobs);
-        setRunStatus("completed");
-      }, 1500);
-      return;
+      await new Promise((r) => setTimeout(r, 1200));
+      const mockJobs: Job[] = [
+        {
+          id: "1",
+          title: "Senior Power BI Developer",
+          company: "TechCorp Inc.",
+          location: "Minneapolis, MN",
+          salary: "$95,000 - $120,000",
+          datePosted: "2025-03-28",
+          source: "Company Site",
+          url: "https://example.com/job/1",
+        },
+        {
+          id: "2",
+          title: "Business Intelligence Analyst",
+          company: "DataFlow Solutions",
+          location: "Remote",
+          salary: "$80,000 - $100,000",
+          datePosted: "2025-03-24",
+          source: "Job Board",
+          url: "https://example.com/job/2",
+        },
+      ];
+      setJobs(mockJobs);
+      return { payload: { run: { run_id: "demo", status: "completed" }, jobs: [] }, phase: "completed" };
     }
 
-    setIsPolling(true);
-    try {
-      const resp = await fetch(
-        `https://n8n.srv930021.hstgr.cloud/webhook-test/5ab7ac89-e65e-4dd5-9865-98ea15f47bf8/runs/${encodeURIComponent(
-          runId
-        )}/results`
-      );
+    const url = `https://n8n.srv930021.hstgr.cloud/webhook-test/5ab7ac89-e65e-4dd5-9865-98ea15f47bf8/runs/${encodeURIComponent(
+      runId
+    )}/results`;
 
-      if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status}`);
+    const resp = await fetch(url, { method: "GET", signal });
+
+    // 202 → still running (our backend may return this while collecting)
+    if (resp.status === 202) {
+      const retryHeader = resp.headers.get("Retry-After");
+      const retryAfterMs = retryHeader ? Number(retryHeader) * 1000 : undefined;
+      return { payload: null, phase: "running", retryAfterMs };
+    }
+
+    if (!resp.ok) {
+      // Treat transient 5xx as running; only 4xx should fail immediately
+      if (resp.status >= 500) {
+        return { payload: null, phase: "running" };
       }
+      // 404 right after start often means DB not populated yet → treat as running
+      if (resp.status === 404) {
+        return { payload: null, phase: "running" };
+      }
+      throw new Error(`HTTP ${resp.status}`);
+    }
 
-      const payload: N8nResultsPayload = await resp.json();
+    const payload: N8nResultsPayload = await resp.json();
 
-      const statusFromRun =
-        payload?.run?.status === "running" ||
-        payload?.run?.status === "completed" ||
-        payload?.run?.status === "failed"
-          ? payload.run.status
-          : ("completed" as RunPhase);
+    // If run is missing or status is running → still in progress
+    if (!payload?.run) {
+      return { payload, phase: "running" };
+    }
 
-      // Update jobs incrementally so users see streaming/partial results
-      const mapped = mapRowsToJobs(payload?.jobs ?? []);
-      setJobs(mapped);
-      setRunStatus(statusFromRun);
+    const s = payload.run.status;
+    if (s === "running") return { payload, phase: "running" };
+    if (s === "completed") return { payload, phase: "completed" };
+    if (s === "failed") return { payload, phase: "failed" };
 
-      // Stop polling if finished or failed
-      if (statusFromRun !== "running") {
-        setIsPolling(false);
-        if (statusFromRun === "failed") {
+    // Fallback (shouldn't happen)
+    return { payload, phase: "running" };
+  }
+
+  // Backoff long-poller with a soft deadline
+  async function pollUntilDone() {
+    if (!runId) return;
+
+    // cancel any prior poller
+    if (abortRef.current) {
+      abortRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setRunStatus("loading");
+    setJobs([]);
+
+    // small head start so the DB rows exist
+    await new Promise((r) => setTimeout(r, 800));
+
+    let delay = 1500;          // start at 1.5s
+    const maxDelay = 7000;     // cap at 7s between polls
+    const deadline = Date.now() + 90_000; // ~90s overall
+
+    while (!controller.signal.aborted) {
+      try {
+        const { payload, phase, retryAfterMs } = await fetchResultsOnce(controller.signal);
+
+        if (payload?.jobs) {
+          setJobs(mapRowsToJobs(payload.jobs));
+        }
+
+        setRunStatus(phase);
+
+        if (phase === "completed") {
+          return;
+        }
+        if (phase === "failed") {
           toast({
             title: "Search Failed",
-            description:
-              (payload?.run?.stop_reason as string) ||
-              "The job search failed. Please try again.",
+            description: payload?.run?.stop_reason || "The job search failed. Please try again.",
             variant: "destructive",
           });
+          return;
         }
-      } else {
-        setIsPolling(false);
+
+        // running — decide next wait
+        const nextWait =
+          typeof retryAfterMs === "number"
+            ? Math.max(800, retryAfterMs)
+            : delay;
+
+        if (Date.now() > deadline) {
+          // stop trying; surface whatever we have
+          setRunStatus("running"); // keep UI in “collecting” state instead of hard fail
+          return;
+        }
+
+        await new Promise((r) => setTimeout(r, nextWait));
+        delay = Math.min(maxDelay, Math.round(delay * 1.6));
+      } catch (err: any) {
+        // Network hiccup: retry until deadline; only show hard error if truly unrecoverable
+        console.warn("Polling error, will retry:", err?.message || err);
+        if (Date.now() > deadline) {
+          setRunStatus("failed");
+          toast({
+            title: "Error fetching results",
+            description: "We couldn't fetch results from the server. Please try again.",
+            variant: "destructive",
+          });
+          return;
+        }
+        await new Promise((r) => setTimeout(r, delay));
+        delay = Math.min(maxDelay, Math.round(delay * 1.6));
       }
-    } catch (err) {
-      console.error("Polling error:", err);
-      setIsPolling(false);
-      setRunStatus("failed");
-      toast({
-        title: "Error fetching results",
-        description:
-          "We couldn't fetch results from the server. Please try again.",
-        variant: "destructive",
-      });
     }
-  };
+  }
 
-  // Kick off initial poll
+  // Kick off poll when runId changes
   useEffect(() => {
-    if (runId) {
-      setRunStatus("loading");
-      pollResults();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId]);
-
-  // Continue polling while running/loading
-  useEffect(() => {
-    let interval: NodeJS.Timeout | undefined;
-    if (runStatus === "running" || runStatus === "loading") {
-      interval = setInterval(pollResults, 3000);
-    }
+    if (!runId) return;
+    pollUntilDone();
     return () => {
-      if (interval) clearInterval(interval);
+      if (abortRef.current) abortRef.current.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runStatus, runId]);
+  }, [runId]);
 
   // Auto-select first job
   useEffect(() => {
