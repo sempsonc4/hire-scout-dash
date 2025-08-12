@@ -118,7 +118,7 @@ const Results = () => {
   const location = searchParams.get("location") || "";
   const isDemo = searchParams.get("demo") === "true";
 
-  // Poll for results
+  // Poll for results with simple GET request (no custom headers)
   const pollResults = async () => {
     if (!runId || isPolling) return;
     
@@ -156,6 +156,7 @@ const Results = () => {
     
     setIsPolling(true);
     try {
+      // Use simple GET request without custom headers
       const response = await fetch(`https://n8n.srv930021.hstgr.cloud/webhook-test/runs/${runId}/results`);
       
       if (!response.ok) {

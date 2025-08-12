@@ -24,16 +24,18 @@ const Home = () => {
     setIsLoading(true);
     
     try {
+      // Create form data to avoid CORS preflight
+      const formData = new URLSearchParams();
+      formData.append('role', searchParams.role);
+      formData.append('location', searchParams.location);
+      formData.append('maxResults', searchParams.maxResults);
+
       const response = await fetch("https://n8n.srv930021.hstgr.cloud/webhook-test/search/start", {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
         },
-        body: JSON.stringify({
-          role: searchParams.role,
-          location: searchParams.location,
-          maxResults: parseInt(searchParams.maxResults)
-        }),
+        body: formData.toString(),
       });
 
       if (!response.ok) {
