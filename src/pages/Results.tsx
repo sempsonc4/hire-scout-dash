@@ -20,44 +20,33 @@ import {
   RefreshCw,
   CheckCircle,
   AlertCircle,
-  XCircle
+  XCircle,
+  Loader2
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
-// Mock data - replace with actual API calls
-const mockJobs = [
-  {
-    id: "1",
-    title: "Senior Software Engineer",
-    company: "TechCorp Inc.",
-    location: "Minneapolis, MN",
-    salary: "$120,000 - $160,000",
-    datePosted: "2 days ago",
-    source: "Company Site",
-    description: "Join our innovative team building next-generation software solutions..."
-  },
-  {
-    id: "2", 
-    title: "Full Stack Developer",
-    company: "StartupXYZ",
-    location: "Remote",
-    salary: "$100,000 - $140,000", 
-    datePosted: "1 week ago",
-    source: "Job Board",
-    description: "Build scalable web applications using modern technologies..."
-  },
-  {
-    id: "3",
-    title: "Software Engineering Manager",
-    company: "BigTech Solutions",
-    location: "Minneapolis, MN",
-    salary: "$150,000 - $200,000",
-    datePosted: "3 days ago", 
-    source: "Recruiting Agency",
-    description: "Lead a team of talented engineers in developing cutting-edge products..."
-  }
-];
+// Types for API responses
+interface Job {
+  id: string;
+  title: string;
+  company: string;
+  location: string;
+  salary?: string;
+  datePosted?: string;
+  source?: string;
+  description?: string;
+  url?: string;
+}
 
+interface RunResult {
+  run_id: string;
+  status: "running" | "completed" | "failed";
+  jobs: Job[];
+  total_jobs?: number;
+  message?: string;
+}
+
+// Mock contacts and messages data (keeping these as placeholders for now)
 const mockContacts = {
   "1": [
     {
@@ -117,19 +106,85 @@ const Results = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
   
+  const [jobs, setJobs] = useState<Job[]>([]);
   const [selectedJob, setSelectedJob] = useState<string | null>(null);
   const [selectedContact, setSelectedContact] = useState<string | null>(null);
   const [messageData, setMessageData] = useState({ subject: "", body: "" });
+  const [runStatus, setRunStatus] = useState<"loading" | "running" | "completed" | "failed">("loading");
+  const [isPolling, setIsPolling] = useState(false);
 
+  const runId = searchParams.get("run_id") || "";
   const role = searchParams.get("role") || "";
   const location = searchParams.get("location") || "";
-  const maxResults = searchParams.get("maxResults") || "";
+
+  // Poll for results
+  const pollResults = async () => {
+    if (!runId || isPolling) return;
+    
+    setIsPolling(true);
+    try {
+      const response = await fetch(`https://n8n.srv930021.hstgr.cloud/webhook-test/runs/${runId}/results`);
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const data: RunResult = await response.json();
+      
+      setRunStatus(data.status);
+      
+      if (data.status === "completed" && data.jobs) {
+        setJobs(data.jobs);
+        setIsPolling(false);
+      } else if (data.status === "failed") {
+        setIsPolling(false);
+        toast({
+          title: "Search Failed",
+          description: data.message || "The job search failed. Please try again.",
+          variant: "destructive"
+        });
+      }
+      // If status is "running", continue polling
+      
+    } catch (error) {
+      console.error("Failed to poll results:", error);
+      setIsPolling(false);
+      setRunStatus("failed");
+      toast({
+        title: "Error fetching results",
+        description: "Unable to fetch search results. Please try again.",
+        variant: "destructive"
+      });
+    }
+  };
+
+  // Start polling when component mounts
+  useEffect(() => {
+    if (runId) {
+      pollResults();
+    }
+  }, [runId]);
+
+  // Continue polling every 3 seconds if status is running
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    
+    if (runStatus === "running" || runStatus === "loading") {
+      interval = setInterval(() => {
+        pollResults();
+      }, 3000);
+    }
+    
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [runStatus, runId]);
 
   useEffect(() => {
-    if (mockJobs.length > 0 && !selectedJob) {
-      setSelectedJob(mockJobs[0].id);
+    if (jobs.length > 0 && !selectedJob) {
+      setSelectedJob(jobs[0].id);
     }
-  }, [selectedJob]);
+  }, [jobs, selectedJob]);
 
   useEffect(() => {
     if (selectedJob) {
@@ -200,7 +255,7 @@ const Results = () => {
               <div>
                 <h1 className="text-lg font-semibold">Search Results</h1>
                 <p className="text-sm text-muted-foreground">
-                  {role} • {location} • {mockJobs.length} results
+                  {role} • {location} • {runStatus === "completed" ? `${jobs.length} results` : runStatus === "running" || runStatus === "loading" ? "Searching..." : "Failed"}
                 </p>
               </div>
             </div>
@@ -216,49 +271,81 @@ const Results = () => {
           <Card className="flex flex-col">
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
-                <Building2 className="w-4 h-4" />
-                Jobs ({mockJobs.length})
+                {runStatus === "running" || runStatus === "loading" ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Building2 className="w-4 h-4" />
+                )}
+                Jobs ({jobs.length})
               </CardTitle>
             </CardHeader>
             <CardContent className="flex-1 overflow-y-auto space-y-3 p-4">
-              {mockJobs.map((job) => (
-                <Card
-                  key={job.id}
-                  className={`cursor-pointer transition-all hover:shadow-professional-sm ${
-                    selectedJob === job.id ? "ring-2 ring-primary" : ""
-                  }`}
-                  onClick={() => setSelectedJob(job.id)}
-                >
-                  <CardContent className="p-4">
-                    <div className="space-y-2">
-                      <div className="flex justify-between items-start">
-                        <h3 className="font-semibold text-sm">{job.title}</h3>
-                        {getSourceBadge(job.source)}
-                      </div>
-                      <div className="flex items-center gap-1 text-muted-foreground text-sm">
-                        <Building2 className="w-3 h-3" />
-                        {job.company}
-                      </div>
-                      <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                        <div className="flex items-center gap-1">
-                          <MapPin className="w-3 h-3" />
-                          {job.location}
+              {runStatus === "loading" || runStatus === "running" ? (
+                <div className="text-center py-8 text-muted-foreground">
+                  <Loader2 className="w-8 h-8 mx-auto mb-2 animate-spin" />
+                  <p className="text-sm">Searching for jobs...</p>
+                  <p className="text-xs mt-1">This may take a few moments</p>
+                </div>
+              ) : runStatus === "failed" ? (
+                <div className="text-center py-8 text-muted-foreground">
+                  <XCircle className="w-8 h-8 mx-auto mb-2 text-destructive" />
+                  <p className="text-sm">Search failed</p>
+                  <Button 
+                    variant="outline" 
+                    size="sm" 
+                    className="mt-2" 
+                    onClick={() => navigate("/")}
+                  >
+                    Try Again
+                  </Button>
+                </div>
+              ) : jobs.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground">
+                  <Building2 className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                  <p className="text-sm">No jobs found</p>
+                </div>
+              ) : (
+                jobs.map((job) => (
+                  <Card
+                    key={job.id}
+                    className={`cursor-pointer transition-all hover:shadow-professional-sm ${
+                      selectedJob === job.id ? "ring-2 ring-primary" : ""
+                    }`}
+                    onClick={() => setSelectedJob(job.id)}
+                  >
+                    <CardContent className="p-4">
+                      <div className="space-y-2">
+                        <div className="flex justify-between items-start">
+                          <h3 className="font-semibold text-sm">{job.title}</h3>
+                          {job.source && getSourceBadge(job.source)}
                         </div>
-                        <div className="flex items-center gap-1">
-                          <Calendar className="w-3 h-3" />
-                          {job.datePosted}
+                        <div className="flex items-center gap-1 text-muted-foreground text-sm">
+                          <Building2 className="w-3 h-3" />
+                          {job.company}
                         </div>
+                        <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                          <div className="flex items-center gap-1">
+                            <MapPin className="w-3 h-3" />
+                            {job.location}
+                          </div>
+                          {job.datePosted && (
+                            <div className="flex items-center gap-1">
+                              <Calendar className="w-3 h-3" />
+                              {job.datePosted}
+                            </div>
+                          )}
+                        </div>
+                        {job.salary && (
+                          <div className="flex items-center gap-1 text-xs text-accent font-medium">
+                            <DollarSign className="w-3 h-3" />
+                            {job.salary}
+                          </div>
+                        )}
                       </div>
-                      {job.salary && (
-                        <div className="flex items-center gap-1 text-xs text-accent font-medium">
-                          <DollarSign className="w-3 h-3" />
-                          {job.salary}
-                        </div>
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
+                    </CardContent>
+                  </Card>
+                ))
+              )}
             </CardContent>
           </Card>
 

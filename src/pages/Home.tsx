@@ -4,27 +4,61 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Search, Target, MapPin, Hash } from "lucide-react";
+import { Search, Target, MapPin, Hash, Loader2 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 
 const Home = () => {
   const navigate = useNavigate();
+  const { toast } = useToast();
+  const [isLoading, setIsLoading] = useState(false);
   const [searchParams, setSearchParams] = useState({
     role: "",
     location: "Minneapolis, MN",
     maxResults: "100"
   });
 
-  const handleSearch = (e: React.FormEvent) => {
+  const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!searchParams.role.trim()) return;
     
-    // Navigate to results with search parameters
-    const params = new URLSearchParams({
-      role: searchParams.role,
-      location: searchParams.location,
-      maxResults: searchParams.maxResults
-    });
-    navigate(`/results?${params.toString()}`);
+    setIsLoading(true);
+    
+    try {
+      const response = await fetch("https://n8n.srv930021.hstgr.cloud/webhook-test/search/start", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          role: searchParams.role,
+          location: searchParams.location,
+          maxResults: parseInt(searchParams.maxResults)
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      if (data.run_id) {
+        // Navigate to results with the run_id
+        navigate(`/results?run_id=${data.run_id}&role=${encodeURIComponent(searchParams.role)}&location=${encodeURIComponent(searchParams.location)}`);
+      } else {
+        throw new Error("No run_id received from server");
+      }
+      
+    } catch (error) {
+      console.error("Search failed:", error);
+      toast({
+        title: "Search Failed",
+        description: "Unable to start job search. Please try again.",
+        variant: "destructive"
+      });
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
@@ -115,10 +149,14 @@ const Home = () => {
                 variant="search" 
                 size="lg" 
                 className="w-full"
-                disabled={!searchParams.role.trim()}
+                disabled={!searchParams.role.trim() || isLoading}
               >
-                <Search className="w-5 h-5 mr-2" />
-                Run Job Search
+                {isLoading ? (
+                  <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                ) : (
+                  <Search className="w-5 h-5 mr-2" />
+                )}
+                {isLoading ? "Starting Search..." : "Run Job Search"}
               </Button>
             </form>
           </CardContent>
