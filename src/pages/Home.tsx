@@ -40,7 +40,7 @@ const Home = () => {
     form.append("params", JSON.stringify(params));
 
     const res = await fetch(
-      "https://n8n.srv930021.hstgr.cloud/webhook-test/search/start",
+      "https://n8n.srv930021.hstgr.cloud/webhook/search/start",
       {
         method: "POST",
         headers: {
