@@ -6,26 +6,27 @@ import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
-import { 
-  ArrowLeft, 
-  Building2, 
-  MapPin, 
-  Calendar, 
-  DollarSign, 
-  Users, 
-  Mail, 
-  Phone, 
-  Linkedin, 
+import {
+  ArrowLeft,
+  Building2,
+  MapPin,
+  Calendar,
+  DollarSign,
+  Users,
+  Mail,
+  Phone,
+  Linkedin,
   Copy,
   RefreshCw,
   CheckCircle,
   AlertCircle,
   XCircle,
-  Loader2
+  Loader2,
+  ExternalLink
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
-// Types for API responses
+// Types for UI
 interface Job {
   id: string;
   title: string;
@@ -33,84 +34,133 @@ interface Job {
   location: string;
   salary?: string;
   datePosted?: string;
-  source?: string;
-  description?: string;
+  source?: string;   // Company Site | Job Board | Recruiting Agency | Other
   url?: string;
 }
 
-interface RunResult {
+type RunPhase = "loading" | "running" | "completed" | "failed";
+
+// n8n GET response types
+interface N8nRunRow {
   run_id: string;
   status: "running" | "completed" | "failed";
-  jobs: Job[];
-  total_jobs?: number;
-  message?: string;
+  stop_reason?: string | null;
+  stats?: Record<string, unknown> | null;
+  created_at?: string;
+  updated_at?: string;
 }
 
-// Mock contacts and messages data (keeping these as placeholders for now)
-const mockContacts = {
+interface N8nJobRow {
+  job_id: string;
+  title?: string | null;
+  company_name?: string | null;
+  location?: string | null;
+  schedule_type?: string | null;
+  salary?: string | null;
+  source?: string | null;
+  source_type?: string | null;
+  link?: string | null;
+  posted_at?: string | null;  // 'YYYY-MM-DD' or null
+  scraped_at?: string | null;
+  updated_at?: string | null;
+}
+
+interface N8nResultsPayload {
+  run: N8nRunRow | null;
+  jobs: N8nJobRow[];
+}
+
+const mockContacts: Record<
+  string,
+  Array<{
+    id: string;
+    name: string;
+    title: string;
+    email?: string;
+    linkedin?: string;
+    phone?: string;
+    verified: "verified" | "unverified" | "pending";
+  }>
+> = {
   "1": [
     {
       id: "c1",
       name: "Sarah Johnson",
-      title: "VP of Engineering", 
+      title: "VP of Engineering",
       email: "sarah.johnson@techcorp.com",
       linkedin: "https://linkedin.com/in/sarahjohnson",
       phone: "+1 (555) 123-4567",
-      verified: "verified"
+      verified: "verified",
     },
     {
-      id: "c2", 
+      id: "c2",
       name: "Mike Chen",
       title: "Senior Hiring Manager",
       email: "mike.chen@techcorp.com",
       linkedin: "https://linkedin.com/in/mikechen",
-      verified: "unverified"
-    }
+      verified: "unverified",
+    },
   ],
   "2": [
     {
       id: "c3",
-      name: "Jessica Brown", 
+      name: "Jessica Brown",
       title: "CTO",
       email: "jessica@startupxyz.com",
       linkedin: "https://linkedin.com/in/jessicabrown",
-      verified: "verified"
-    }
+      verified: "verified",
+    },
   ],
   "3": [
     {
       id: "c4",
       name: "David Wilson",
       title: "Director of Engineering",
-      email: "david.wilson@bigtech.com", 
+      email: "david.wilson@bigtech.com",
       linkedin: "https://linkedin.com/in/davidwilson",
       phone: "+1 (555) 987-6543",
-      verified: "pending"
-    }
-  ]
+      verified: "pending",
+    },
+  ],
 };
 
-const mockMessages = {
-  "c1": {
+const mockMessages: Record<string, { subject: string; body: string }> = {
+  c1: {
     subject: "Exploring Senior Software Engineer Opportunity at TechCorp",
-    body: "Hi Sarah,\n\nI hope this message finds you well. I came across the Senior Software Engineer position at TechCorp and was immediately drawn to your innovative approach to software development.\n\nWith my 5+ years of experience in full-stack development and passion for scalable solutions, I believe I could contribute significantly to your team's continued success.\n\nWould you be available for a brief conversation about this opportunity?\n\nBest regards"
+    body: `Hi Sarah,
+
+I hope this message finds you well. I came across the Senior Software Engineer position at TechCorp and was immediately drawn to your innovative approach to software development.
+
+With my 5+ years of experience in full-stack development and passion for scalable solutions, I believe I could contribute significantly to your team's continued success.
+
+Would you be available for a brief conversation about this opportunity?
+
+Best regards`,
   },
-  "c2": {
+  c2: {
     subject: "Senior Software Engineer Role - Let's Connect",
-    body: "Hello Mike,\n\nI'm reaching out regarding the Senior Software Engineer position at TechCorp. Your team's reputation for technical excellence aligns perfectly with my career aspirations.\n\nI'd love to discuss how my background in modern web technologies could benefit your engineering initiatives.\n\nLooking forward to connecting!\n\nBest"
-  }
+    body: `Hello Mike,
+
+I'm reaching out regarding the Senior Software Engineer position at TechCorp. Your team's reputation for technical excellence aligns perfectly with my career aspirations.
+
+I'd love to discuss how my background in modern web technologies could benefit your engineering initiatives.
+
+Looking forward to connecting!
+
+Best`,
+  },
 };
 
 const Results = () => {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { toast } = useToast();
-  
+
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selectedJob, setSelectedJob] = useState<string | null>(null);
   const [selectedContact, setSelectedContact] = useState<string | null>(null);
   const [messageData, setMessageData] = useState({ subject: "", body: "" });
-  const [runStatus, setRunStatus] = useState<"loading" | "running" | "completed" | "failed">("loading");
+  const [runStatus, setRunStatus] = useState<RunPhase>("loading");
   const [isPolling, setIsPolling] = useState(false);
 
   const runId = searchParams.get("run_id") || "";
@@ -118,11 +168,24 @@ const Results = () => {
   const location = searchParams.get("location") || "";
   const isDemo = searchParams.get("demo") === "true";
 
-  // Poll for results with simple GET request (no custom headers)
+  // Map DB rows -> UI jobs
+  const mapRowsToJobs = (rows: N8nJobRow[]): Job[] =>
+    rows.map((r) => ({
+      id: r.job_id,
+      title: r.title ?? "",
+      company: r.company_name ?? "",
+      location: r.location ?? "",
+      salary: r.salary ?? undefined,
+      datePosted: r.posted_at ?? undefined,
+      source: r.source_type ?? r.source ?? undefined,
+      url: r.link ?? undefined,
+    }));
+
+  // Poll for results with simple GET (no custom headers)
   const pollResults = async () => {
     if (!runId || isPolling) return;
-    
-    // Demo mode with mock data
+
+    // Demo fallback if the Home page flagged CORS failure
     if (isDemo) {
       setRunStatus("running");
       setTimeout(() => {
@@ -133,93 +196,110 @@ const Results = () => {
             company: "TechCorp Inc.",
             location: "Minneapolis, MN",
             salary: "$95,000 - $120,000",
-            datePosted: "2 days ago",
+            datePosted: "2025-03-28",
             source: "Company Site",
-            description: "Join our data analytics team..."
+            url: "https://example.com/job/1",
           },
           {
-            id: "2", 
+            id: "2",
             title: "Business Intelligence Analyst",
             company: "DataFlow Solutions",
             location: "Remote",
-            salary: "$80,000 - $100,000", 
-            datePosted: "1 week ago",
+            salary: "$80,000 - $100,000",
+            datePosted: "2025-03-24",
             source: "Job Board",
-            description: "Build interactive dashboards..."
-          }
+            url: "https://example.com/job/2",
+          },
         ];
         setJobs(mockJobs);
         setRunStatus("completed");
-      }, 2000);
+      }, 1500);
       return;
     }
-    
+
     setIsPolling(true);
     try {
-      // Use simple GET request without custom headers
-      const response = await fetch(`https://n8n.srv930021.hstgr.cloud/webhook-test/runs/${runId}/results`);
-      
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      const resp = await fetch(
+        `https://n8n.srv930021.hstgr.cloud/webhook-test/5ab7ac89-e65e-4dd5-9865-98ea15f47bf8/runs/${encodeURIComponent(
+          runId
+        )}/results`
+      );
+
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
       }
-      
-      const data: RunResult = await response.json();
-      
-      setRunStatus(data.status);
-      
-      if (data.status === "completed" && data.jobs) {
-        setJobs(data.jobs);
+
+      const payload: N8nResultsPayload = await resp.json();
+
+      const statusFromRun =
+        payload?.run?.status === "running" ||
+        payload?.run?.status === "completed" ||
+        payload?.run?.status === "failed"
+          ? payload.run.status
+          : ("completed" as RunPhase);
+
+      // Update jobs incrementally so users see streaming/partial results
+      const mapped = mapRowsToJobs(payload?.jobs ?? []);
+      setJobs(mapped);
+      setRunStatus(statusFromRun);
+
+      // Stop polling if finished or failed
+      if (statusFromRun !== "running") {
         setIsPolling(false);
-      } else if (data.status === "failed") {
+        if (statusFromRun === "failed") {
+          toast({
+            title: "Search Failed",
+            description:
+              (payload?.run?.stop_reason as string) ||
+              "The job search failed. Please try again.",
+            variant: "destructive",
+          });
+        }
+      } else {
         setIsPolling(false);
-        toast({
-          title: "Search Failed",
-          description: data.message || "The job search failed. Please try again.",
-          variant: "destructive"
-        });
       }
-      // If status is "running", continue polling
-      
-    } catch (error) {
-      console.error("Failed to poll results:", error);
+    } catch (err) {
+      console.error("Polling error:", err);
       setIsPolling(false);
       setRunStatus("failed");
       toast({
         title: "Error fetching results",
-        description: "Unable to fetch search results. Please try again.",
-        variant: "destructive"
+        description:
+          "We couldn't fetch results from the server. Please try again.",
+        variant: "destructive",
       });
     }
   };
 
-  // Start polling when component mounts
+  // Kick off initial poll
   useEffect(() => {
     if (runId) {
+      setRunStatus("loading");
       pollResults();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId]);
 
-  // Continue polling every 3 seconds if status is running
+  // Continue polling while running/loading
   useEffect(() => {
-    let interval: NodeJS.Timeout;
-    
+    let interval: NodeJS.Timeout | undefined;
     if (runStatus === "running" || runStatus === "loading") {
-      interval = setInterval(() => {
-        pollResults();
-      }, 3000);
+      interval = setInterval(pollResults, 3000);
     }
-    
     return () => {
       if (interval) clearInterval(interval);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runStatus, runId]);
 
+  // Auto-select first job
   useEffect(() => {
     if (jobs.length > 0 && !selectedJob) {
       setSelectedJob(jobs[0].id);
     }
   }, [jobs, selectedJob]);
 
+  // Manage mock contacts selection
   useEffect(() => {
     if (selectedJob) {
       const contacts = mockContacts[selectedJob] || [];
@@ -231,6 +311,7 @@ const Results = () => {
     }
   }, [selectedJob, selectedContact]);
 
+  // Load mock message for selected contact
   useEffect(() => {
     if (selectedContact && mockMessages[selectedContact]) {
       setMessageData(mockMessages[selectedContact]);
@@ -244,34 +325,48 @@ const Results = () => {
     navigator.clipboard.writeText(fullMessage);
     toast({
       title: "Message copied to clipboard",
-      description: "You can now paste it into your email client."
+      description: "You can now paste it into your email client.",
     });
   };
 
   const handleRegenerateMessage = () => {
     toast({
       title: "Message regenerated",
-      description: "AI has generated a new personalized message."
+      description: "AI has generated a new personalized message.",
     });
-    // In real implementation, this would call the backend API
+    // TODO: wire to backend AI compose when available
   };
 
   const getVerificationBadge = (status: string) => {
     switch (status) {
       case "verified":
-        return <Badge variant="verified" className="ml-2"><CheckCircle className="w-3 h-3 mr-1" />Verified</Badge>;
-      case "unverified": 
-        return <Badge variant="unverified" className="ml-2"><XCircle className="w-3 h-3 mr-1" />Unverified</Badge>;
+        return (
+          <Badge variant="verified" className="ml-2">
+            <CheckCircle className="w-3 h-3 mr-1" />
+            Verified
+          </Badge>
+        );
+      case "unverified":
+        return (
+          <Badge variant="unverified" className="ml-2">
+            <XCircle className="w-3 h-3 mr-1" />
+            Unverified
+          </Badge>
+        );
       case "pending":
-        return <Badge variant="warning" className="ml-2"><AlertCircle className="w-3 h-3 mr-1" />Pending</Badge>;
+        return (
+          <Badge variant="warning" className="ml-2">
+            <AlertCircle className="w-3 h-3 mr-1" />
+            Pending
+          </Badge>
+        );
       default:
         return null;
     }
   };
 
-  const getSourceBadge = (source: string) => {
-    return <Badge variant="source">{source}</Badge>;
-  };
+  const getSourceBadge = (source?: string) =>
+    source ? <Badge variant="source">{source}</Badge> : null;
 
   const currentContacts = selectedJob ? mockContacts[selectedJob] || [] : [];
 
@@ -289,7 +384,12 @@ const Results = () => {
               <div>
                 <h1 className="text-lg font-semibold">Search Results</h1>
                 <p className="text-sm text-muted-foreground">
-                  {role} • {location} • {runStatus === "completed" ? `${jobs.length} results` : runStatus === "running" || runStatus === "loading" ? "Searching..." : "Failed"}
+                  {role} • {location} •{" "}
+                  {runStatus === "completed"
+                    ? `${jobs.length} results`
+                    : runStatus === "running" || runStatus === "loading"
+                    ? "Searching..."
+                    : "Failed"}
                 </p>
               </div>
             </div>
@@ -300,7 +400,6 @@ const Results = () => {
       {/* Main Content */}
       <div className="container mx-auto p-4">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[calc(100vh-8rem)]">
-          
           {/* Jobs Panel */}
           <Card className="flex flex-col">
             <CardHeader className="pb-3">
@@ -324,10 +423,10 @@ const Results = () => {
                 <div className="text-center py-8 text-muted-foreground">
                   <XCircle className="w-8 h-8 mx-auto mb-2 text-destructive" />
                   <p className="text-sm">Search failed</p>
-                  <Button 
-                    variant="outline" 
-                    size="sm" 
-                    className="mt-2" 
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-2"
                     onClick={() => navigate("/")}
                   >
                     Try Again
@@ -351,7 +450,7 @@ const Results = () => {
                       <div className="space-y-2">
                         <div className="flex justify-between items-start">
                           <h3 className="font-semibold text-sm">{job.title}</h3>
-                          {job.source && getSourceBadge(job.source)}
+                          {getSourceBadge(job.source)}
                         </div>
                         <div className="flex items-center gap-1 text-muted-foreground text-sm">
                           <Building2 className="w-3 h-3" />
@@ -373,6 +472,19 @@ const Results = () => {
                           <div className="flex items-center gap-1 text-xs text-accent font-medium">
                             <DollarSign className="w-3 h-3" />
                             {job.salary}
+                          </div>
+                        )}
+                        {job.url && (
+                          <div className="pt-1">
+                            <a
+                              href={job.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              View posting <ExternalLink className="w-3 h-3" />
+                            </a>
                           </div>
                         )}
                       </div>
