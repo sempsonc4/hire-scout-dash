@@ -51,6 +51,21 @@ const Home = () => {
       
     } catch (error) {
       console.error("Search failed:", error);
+      
+      // Check if it's a CORS error
+      if (error instanceof TypeError && error.message === "Failed to fetch") {
+        toast({
+          title: "CORS Error",
+          description: "Backend needs CORS configuration. Using demo mode for now.",
+          variant: "default"
+        });
+        
+        // Simulate successful response for demo purposes
+        const mockRunId = `demo_${Date.now()}`;
+        navigate(`/results?run_id=${mockRunId}&role=${encodeURIComponent(searchParams.role)}&location=${encodeURIComponent(searchParams.location)}&demo=true`);
+        return;
+      }
+      
       toast({
         title: "Search Failed",
         description: "Unable to start job search. Please try again.",

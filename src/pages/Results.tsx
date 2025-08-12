@@ -116,10 +116,43 @@ const Results = () => {
   const runId = searchParams.get("run_id") || "";
   const role = searchParams.get("role") || "";
   const location = searchParams.get("location") || "";
+  const isDemo = searchParams.get("demo") === "true";
 
   // Poll for results
   const pollResults = async () => {
     if (!runId || isPolling) return;
+    
+    // Demo mode with mock data
+    if (isDemo) {
+      setRunStatus("running");
+      setTimeout(() => {
+        const mockJobs: Job[] = [
+          {
+            id: "1",
+            title: "Senior Power BI Developer",
+            company: "TechCorp Inc.",
+            location: "Minneapolis, MN",
+            salary: "$95,000 - $120,000",
+            datePosted: "2 days ago",
+            source: "Company Site",
+            description: "Join our data analytics team..."
+          },
+          {
+            id: "2", 
+            title: "Business Intelligence Analyst",
+            company: "DataFlow Solutions",
+            location: "Remote",
+            salary: "$80,000 - $100,000", 
+            datePosted: "1 week ago",
+            source: "Job Board",
+            description: "Build interactive dashboards..."
+          }
+        ];
+        setJobs(mockJobs);
+        setRunStatus("completed");
+      }, 2000);
+      return;
+    }
     
     setIsPolling(true);
     try {
