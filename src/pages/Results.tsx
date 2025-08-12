@@ -217,7 +217,7 @@ const Results = () => {
       return { payload: { run: { run_id: "demo", status: "completed" }, jobs: [] }, phase: "completed" };
     }
 
-    const url = `https://n8n.srv930021.hstgr.cloud/webhook-test/5ab7ac89-e65e-4dd5-9865-98ea15f47bf8/runs/${encodeURIComponent(
+    const url = `https://n8n.srv930021.hstgr.cloud/webhook/5ab7ac89-e65e-4dd5-9865-98ea15f47bf8/runs/${encodeURIComponent(
       runId
     )}/results`;
 
