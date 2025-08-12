@@ -18,65 +18,68 @@ const Home = () => {
   });
 
   const handleSearch = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!searchParams.role.trim()) return;
-    
-    setIsLoading(true);
-    
-    try {
-      // Create form data to avoid CORS preflight
-      const formData = new URLSearchParams();
-      formData.append('role', searchParams.role);
-      formData.append('location', searchParams.location);
-      formData.append('maxResults', searchParams.maxResults);
+  e.preventDefault();
+  if (!searchParams.role.trim()) return;
 
-      const response = await fetch("https://n8n.srv930021.hstgr.cloud/webhook-test/search/start", {
+  setIsLoading(true);
+
+  try {
+    // Send form-encoded with the exact keys n8n expects:
+    //  - query  (string)
+    //  - params (JSON string with location/max_results/etc.)
+    const params = {
+      location: searchParams.location,
+      max_results: Number(searchParams.maxResults) || 100,
+      max_pages: 10,
+      absolute_max_results: 200,
+      enable_safeguards: true,
+    };
+
+    const form = new URLSearchParams();
+    form.append("query", searchParams.role.trim());
+    form.append("params", JSON.stringify(params));
+
+    const res = await fetch(
+      "https://n8n.srv930021.hstgr.cloud/webhook-test/search/start",
+      {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
         },
-        body: formData.toString(),
-      });
+        body: form.toString(),
+      }
+    );
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      
-      if (data.run_id) {
-        // Navigate to results with the run_id
-        navigate(`/results?run_id=${data.run_id}&role=${encodeURIComponent(searchParams.role)}&location=${encodeURIComponent(searchParams.location)}`);
-      } else {
-        throw new Error("No run_id received from server");
-      }
-      
-    } catch (error) {
-      console.error("Search failed:", error);
-      
-      // Check if it's a CORS error
-      if (error instanceof TypeError && error.message === "Failed to fetch") {
-        toast({
-          title: "CORS Error",
-          description: "Backend needs CORS configuration. Using demo mode for now.",
-          variant: "default"
-        });
-        
-        // Simulate successful response for demo purposes
-        const mockRunId = `demo_${Date.now()}`;
-        navigate(`/results?run_id=${mockRunId}&role=${encodeURIComponent(searchParams.role)}&location=${encodeURIComponent(searchParams.location)}&demo=true`);
-        return;
-      }
-      
-      toast({
-        title: "Search Failed",
-        description: "Unable to start job search. Please try again.",
-        variant: "destructive"
-      });
-    } finally {
-      setIsLoading(false);
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(`Start failed (${res.status}): ${txt || res.statusText}`);
     }
-  };
+
+    const data = await res.json();
+
+    if (!data?.run_id) {
+      throw new Error("Backend did not return a run_id");
+    }
+
+    navigate(
+      `/results?run_id=${encodeURIComponent(
+        data.run_id
+      )}&role=${encodeURIComponent(searchParams.role)}&location=${encodeURIComponent(
+        searchParams.location
+      )}`
+    );
+  } catch (err: any) {
+    console.error("Search failed:", err);
+    toast({
+      title: "Search Failed",
+      description:
+        err?.message || "Unable to start job search. Please try again.",
+      variant: "destructive",
+    });
+  } finally {
+    setIsLoading(false);
+  }
+};
 
   return (
     <div className="min-h-screen bg-gradient-surface">
