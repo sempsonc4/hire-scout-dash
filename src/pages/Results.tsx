@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { useSearchParams, useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -28,7 +28,7 @@ import { useToast } from "@/hooks/use-toast";
 import { createJWTClient } from "@/lib/supabaseClient";
 import type { Database } from "@/integrations/supabase/types";
 
-// UI types
+// UI Types
 interface Job {
   id: string;
   title: string;
@@ -42,18 +42,16 @@ interface Job {
 
 type RunPhase = "loading" | "running" | "completed" | "failed";
 
-// DB types
+// DB Types
 type RunRow = Database["public"]["Tables"]["runs"]["Row"];
 type JobRow = Database["public"]["Tables"]["jobs"]["Row"];
 
 type LocationState = {
   jwt?: string;
-  exp?: number;       // unix seconds
+  exp?: number;
   searchId?: string;
-  // viewToken?: string; // not strictly needed on frontend
 };
 
-// ---- Mock contacts/messages (unchanged) ----
 const mockContacts: Record<
   string,
   Array<{
@@ -135,19 +133,6 @@ Best`,
   },
 };
 
-// ----- Helpers -----
-const mapRowsToJobs = (rows: JobRow[] = []): Job[] =>
-  rows.map((r) => ({
-    id: r.job_id!,
-    title: r.title ?? "",
-    company: r.company_name ?? "",
-    location: r.location ?? "",
-    salary: r.salary ?? undefined,
-    datePosted: r.posted_at ?? undefined,
-    source: r.source_type ?? r.source ?? undefined,
-    url: r.link ?? undefined,
-  }));
-
 const Results = () => {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -161,52 +146,84 @@ const Results = () => {
   const [runStatus, setRunStatus] = useState<RunPhase>("loading");
   const [runData, setRunData] = useState<RunRow | null>(null);
 
-  const supabaseClient = useRef<ReturnType<typeof createJWTClient> | null>(null);
-  const realtimeChannel = useRef<ReturnType<NonNullable<typeof supabaseClient.current>["channel"]> | null>(null);
-  const oneShotPollTimeout = useRef<number | null>(null);
+  const supabaseRef = useRef<ReturnType<typeof createJWTClient> | null>(null);
+  const channelRef = useRef<ReturnType<NonNullable<typeof supabaseRef["current"]>["channel"]> | null>(null);
+  const pollTimerRef = useRef<number | null>(null);
+  const statusRef = useRef<RunPhase>("loading"); // keeps latest status for logs
 
   const runId = searchParams.get("run_id") || "";
   const role = searchParams.get("role") || "";
   const loc = searchParams.get("location") || "";
   const isDemo = searchParams.get("demo") === "true";
 
-  // Initialize Supabase client with JWT and fetch initial data
+  const state = location.state as LocationState | null;
+  const jwt = state?.jwt;
+  const jwtExp = state?.exp;
+
+  // Helpers
+  const mapRowsToJobs = useCallback((rows: JobRow[]): Job[] => {
+    return rows.map((r) => ({
+      id: r.job_id,
+      title: r.title ?? "",
+      company: r.company_name ?? "",
+      location: r.location ?? "",
+      salary: r.salary ?? undefined,
+      datePosted: r.posted_at ?? undefined,
+      source: r.source_type ?? r.source ?? undefined,
+      url: r.link ?? undefined,
+    }));
+  }, []);
+
+  const upsertJobsInState = useCallback((incoming: JobRow[] | JobRow) => {
+    const list = Array.isArray(incoming) ? incoming : [incoming];
+    setJobs((prev) => {
+      const byId = new Map(prev.map((j) => [j.id, j]));
+      for (const row of list) {
+        const j = mapRowsToJobs([row])[0];
+        byId.set(j.id, { ...(byId.get(j.id) || {}), ...j });
+      }
+      const next = Array.from(byId.values());
+      return next;
+    });
+  }, [mapRowsToJobs]);
+
+  // DEMO shortcut
   useEffect(() => {
-    if (isDemo) {
-      const demoJobs: Job[] = [
-        {
-          id: "1",
-          title: "Senior Power BI Developer",
-          company: "TechCorp Inc.",
-          location: "Minneapolis, MN",
-          salary: "$95,000 - $120,000",
-          datePosted: "2025-03-28",
-          source: "Company Site",
-          url: "https://example.com/job/1",
-        },
-        {
-          id: "2",
-          title: "Business Intelligence Analyst",
-          company: "DataFlow Solutions",
-          location: "Remote",
-          salary: "$80,000 - $100,000",
-          datePosted: "2025-03-24",
-          source: "Job Board",
-          url: "https://example.com/job/2",
-        },
-      ];
-      setJobs(demoJobs);
-      setRunStatus("completed");
-      return;
-    }
+    if (!isDemo) return;
+    const demoJobs: Job[] = [
+      {
+        id: "1",
+        title: "Senior Power BI Developer",
+        company: "TechCorp Inc.",
+        location: "Minneapolis, MN",
+        salary: "$95,000 - $120,000",
+        datePosted: "2025-03-28",
+        source: "Company Site",
+        url: "https://example.com/job/1",
+      },
+      {
+        id: "2",
+        title: "Business Intelligence Analyst",
+        company: "DataFlow Solutions",
+        location: "Remote",
+        salary: "$80,000 - $100,000",
+        datePosted: "2025-03-24",
+        source: "Job Board",
+        url: "https://example.com/job/2",
+      },
+    ];
+    setJobs(demoJobs);
+    setRunStatus("completed");
+  }, [isDemo]);
+
+  // Initialize client + load first data + realtime
+  useEffect(() => {
+    if (isDemo) return;
 
     if (!runId) {
       setRunStatus("failed");
       return;
     }
-
-    const state = location.state as LocationState | null;
-    const jwt = state?.jwt;
 
     if (!jwt) {
       toast({
@@ -218,8 +235,7 @@ const Results = () => {
       return;
     }
 
-    // Expiry check
-    if (state?.exp && Date.now() / 1000 > state.exp) {
+    if (jwtExp && Date.now() / 1000 > jwtExp) {
       toast({
         title: "Session expired",
         description: "Please start a new search to view results.",
@@ -229,142 +245,152 @@ const Results = () => {
       return;
     }
 
-    // Create per-run Supabase client with the scoped JWT
-    supabaseClient.current = createJWTClient(jwt);
+    let cancelled = false;
 
-    const initializeData = async () => {
+    const init = async () => {
       try {
-        // Fetch run
-        const { data: runRow, error: runError } = await supabaseClient.current!
-          .from("runs")
-          .select("*")
-          .eq("run_id", runId)
-          .single();
+        // Create client and set auth for both REST & Realtime
+        const client = createJWTClient(jwt);
+        supabaseRef.current = client;
 
-        if (runError) throw runError;
+        await client.auth.setSession({
+          access_token: jwt,
+          refresh_token: "",
+        });
+        client.realtime.setAuth(jwt);
 
+        // Initial fetch
+        const [{ data: runRow, error: runErr }, { data: jobsRows, error: jobsErr }] = await Promise.all([
+          client.from("runs").select("*").eq("run_id", runId).single(),
+          client.from("jobs").select("*").eq("run_id", runId).order("updated_at", { ascending: false }),
+        ]);
+
+        if (cancelled) return;
+
+        if (runErr) throw runErr;
         setRunData(runRow);
-        setRunStatus(
-          runRow.status === "completed"
-            ? "completed"
-            : runRow.status === "failed"
-            ? "failed"
-            : "running"
-        );
+        const phase: RunPhase =
+          runRow.status === "completed" ? "completed" : runRow.status === "failed" ? "failed" : "running";
+        setRunStatus(phase);
+        statusRef.current = phase;
 
-        // Fetch initial jobs
-        const { data: jobRows, error: jobsError } = await supabaseClient.current!
+        if (jobsErr) throw jobsErr;
+        setJobs(mapRowsToJobs(jobsRows || []));
+
+        // Realtime subscriptions
+        const channel = client.channel(`search-results-${runId}`);
+
+        channel
+          .on(
+            "postgres_changes",
+            { event: "UPDATE", schema: "public", table: "runs", filter: `run_id=eq.${runId}` },
+            (payload) => {
+              const newRun = payload.new as RunRow;
+              setRunData(newRun);
+              const nextPhase: RunPhase =
+                newRun.status === "completed" ? "completed" : newRun.status === "failed" ? "failed" : "running";
+              setRunStatus(nextPhase);
+              statusRef.current = nextPhase;
+            }
+          )
+          .on(
+            "postgres_changes",
+            // Listen to BOTH inserts and updates (upserts may fire UPDATE)
+            { event: "*", schema: "public", table: "jobs", filter: `run_id=eq.${runId}` },
+            (payload) => {
+              const row = payload.new as JobRow;
+              upsertJobsInState(row);
+            }
+          )
+          .subscribe((status) => {
+            console.log("Realtime subscription status:", status);
+            if (status === "CHANNEL_ERROR") {
+              console.error("Realtime subscription error");
+            }
+          });
+
+        channelRef.current = channel;
+      } catch (err: any) {
+        console.error("Error initializing results page:", err);
+        toast({
+          title: "Error loading results",
+          description: err.message || "Failed to load search results.",
+          variant: "destructive",
+        });
+        setRunStatus("failed");
+        statusRef.current = "failed";
+      }
+    };
+
+    init();
+
+    return () => {
+      cancelled = true;
+      if (channelRef.current && supabaseRef.current) {
+        supabaseRef.current.removeChannel(channelRef.current);
+        channelRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runId, jwt, jwtExp, isDemo, navigate, toast]);
+
+  // Polling fallback that respects *current* runStatus
+  useEffect(() => {
+    if (isDemo) return;
+    if (!supabaseRef.current || !runId) return;
+
+    // only poll while running/loading
+    if (runStatus === "completed" || runStatus === "failed") {
+      if (pollTimerRef.current) {
+        window.clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+      return;
+    }
+
+    const tick = async () => {
+      try {
+        const { data, error } = await supabaseRef.current!
           .from("jobs")
           .select("*")
           .eq("run_id", runId)
           .order("updated_at", { ascending: false });
 
-        if (jobsError) throw jobsError;
-
-        const initialJobs = mapRowsToJobs(jobRows || []);
-        setJobs(initialJobs);
-
-        // Setup realtime
-        setupRealtime();
-
-        // One-shot fallback: if after 5s we still have no jobs, try one more fetch
-        if (initialJobs.length === 0) {
-          oneShotPollTimeout.current = window.setTimeout(async () => {
-            try {
-              const { data: rows } = await supabaseClient.current!
-                .from("jobs")
-                .select("*")
-                .eq("run_id", runId)
-                .order("updated_at", { ascending: false });
-
-              if (rows && rows.length > 0) {
-                setJobs(mapRowsToJobs(rows));
-              }
-            } catch {}
-          }, 5000);
+        if (error) {
+          if ((error as any).code === "PGRST303") {
+            console.warn("JWT expired — stopping polling");
+            toast({
+              title: "Session expired",
+              description: "Please start a new search to refresh access.",
+              variant: "destructive",
+            });
+            setRunStatus("failed");
+            statusRef.current = "failed";
+          } else {
+            console.error("Error fetching jobs:", error);
+          }
+          return;
         }
-      } catch (error: any) {
-        console.error("Error fetching initial data:", error);
-        toast({
-          title: "Error loading results",
-          description: error.message || "Failed to load search results.",
-          variant: "destructive",
-        });
-        setRunStatus("failed");
+
+        // Merge/Upsert
+        upsertJobsInState(data || []);
+      } catch (e) {
+        console.error("Error in polling tick:", e);
       }
     };
 
-    initializeData();
+    // kick once, then every 5s
+    tick();
+    const id = window.setInterval(tick, 5000);
+    pollTimerRef.current = id;
 
     return () => {
-      // Cleanup channel and timer
-      if (realtimeChannel.current) {
-        supabaseClient.current?.removeChannel(realtimeChannel.current);
-        realtimeChannel.current = null;
-      }
-      if (oneShotPollTimeout.current) {
-        window.clearTimeout(oneShotPollTimeout.current);
-        oneShotPollTimeout.current = null;
+      if (pollTimerRef.current) {
+        window.clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
       }
     };
-  }, [runId, location.state, isDemo, navigate, toast]);
-
-  const setupRealtime = () => {
-    if (!supabaseClient.current || !runId) return;
-
-    console.log("Setting up realtime subscriptions for run_id:", runId);
-
-    const channel = supabaseClient.current
-      .channel(`run_${runId}`)
-      // Runs status updates
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "runs", filter: `run_id=eq.${runId}` },
-        (payload) => {
-          const newRun = payload.new as RunRow;
-          setRunData(newRun);
-          setRunStatus(
-            newRun.status === "completed"
-              ? "completed"
-              : newRun.status === "failed"
-              ? "failed"
-              : "running"
-          );
-        }
-      )
-      // New jobs inserted
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "jobs", filter: `run_id=eq.${runId}` },
-        (payload) => {
-          const row = payload.new as JobRow;
-          setJobs((prev) =>
-            prev.some((j) => j.id === row.job_id)
-              ? prev
-              : [...mapRowsToJobs([row]), ...prev]
-          );
-        }
-      )
-      // Existing jobs updated (covers ON CONFLICT DO UPDATE)
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "jobs", filter: `run_id=eq.${runId}` },
-        (payload) => {
-          const row = payload.new as JobRow;
-          setJobs((prev) =>
-            prev.map((j) => (j.id === row.job_id ? mapRowsToJobs([row])[0] : j))
-          );
-        }
-      )
-      .subscribe((status) => {
-        console.log("Realtime subscription status:", status);
-        if (status === "CHANNEL_ERROR") {
-          console.error("Realtime subscription error");
-        }
-      });
-
-    realtimeChannel.current = channel;
-  };
+  }, [isDemo, runId, runStatus, upsertJobsInState, toast]);
 
   // Auto-select first job
   useEffect(() => {
@@ -373,7 +399,7 @@ const Results = () => {
     }
   }, [jobs, selectedJob]);
 
-  // Manage mock contacts selection
+  // Mock contacts selection
   useEffect(() => {
     if (selectedJob) {
       const contacts = mockContacts[selectedJob] || [];
@@ -385,7 +411,7 @@ const Results = () => {
     }
   }, [selectedJob, selectedContact]);
 
-  // Load mock message for selected contact
+  // Load mock message
   useEffect(() => {
     if (selectedContact && mockMessages[selectedContact]) {
       setMessageData(mockMessages[selectedContact]);
@@ -460,10 +486,9 @@ const Results = () => {
                   {role} • {loc} •{" "}
                   {runStatus === "completed"
                     ? `${jobs.length} results`
-                    : runStatus === "failed"
-                    ? "Failed"
-                    : // Show progress copy while still rendering incremental results
-                      `Processing${jobs.length ? ` • ${jobs.length} found so far` : "..."}`}
+                    : runStatus === "running" || runStatus === "loading"
+                    ? "Processing..."
+                    : "Failed"}
                 </p>
               </div>
             </div>
@@ -473,12 +498,12 @@ const Results = () => {
 
       {/* Main Content */}
       <div className="container mx-auto p-4">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[calc(100vh-8rem)]">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h=[calc(100vh-8rem)] lg:h-[calc(100vh-8rem)]">
           {/* Jobs Panel */}
           <Card className="flex flex-col">
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
-                {runStatus === "running" || runStatus === "loading" ? (
+                {(runStatus === "running" || runStatus === "loading") ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
                 ) : (
                   <Building2 className="w-4 h-4" />
@@ -487,8 +512,7 @@ const Results = () => {
               </CardTitle>
             </CardHeader>
             <CardContent className="flex-1 overflow-y-auto space-y-3 p-4">
-              {/* Show skeleton only when loading/running AND we have no jobs yet */}
-              {(runStatus === "loading" || runStatus === "running") && jobs.length === 0 ? (
+              {runStatus === "loading" || runStatus === "running" ? (
                 <div className="text-center py-8 text-muted-foreground">
                   <Loader2 className="w-8 h-8 mx-auto mb-2 animate-spin" />
                   <p className="text-sm">Processing results...</p>
@@ -498,7 +522,12 @@ const Results = () => {
                 <div className="text-center py-8 text-muted-foreground">
                   <XCircle className="w-8 h-8 mx-auto mb-2 text-destructive" />
                   <p className="text-sm">Search failed</p>
-                  <Button variant="outline" size="sm" className="mt-2" onClick={() => navigate("/")}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-2"
+                    onClick={() => navigate("/")}
+                  >
                     Try Again
                   </Button>
                 </div>
@@ -519,7 +548,9 @@ const Results = () => {
                   >
                     <CardContent className="p-4">
                       <div className="flex justify-between items-start mb-2">
-                        <h3 className="font-medium text-sm leading-tight">{job.title}</h3>
+                        <h3 className="font-medium text-sm leading-tight">
+                          {job.title}
+                        </h3>
                         {getSourceBadge(job.source)}
                       </div>
                       <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2">
@@ -536,8 +567,8 @@ const Results = () => {
                         <div className="flex items-center gap-4">
                           {job.salary && (
                             <div className="flex items-center gap-1 text-xs">
-                              <DollarSign className="w-3 h-3 text-green-600" />
-                              <span className="text-green-600 font-medium">{job.salary}</span>
+                              <DollarSign className="w-3 h-3" />
+                              <span className="font-medium">{job.salary}</span>
                             </div>
                           )}
                           {job.datePosted && (
@@ -567,7 +598,7 @@ const Results = () => {
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
                 <Users className="w-4 h-4" />
-                Contacts ({(selectedJob ? mockContacts[selectedJob] || [] : []).length})
+                Contacts ({(selectedJob && (mockContacts[selectedJob] || []).length) || 0})
               </CardTitle>
             </CardHeader>
             <CardContent className="flex-1 overflow-y-auto space-y-3 p-4">
@@ -595,9 +626,37 @@ const Results = () => {
                       <div className="flex items-start justify-between mb-2">
                         <div>
                           <h3 className="font-medium text-sm">{contact.name}</h3>
-                          <p className="text-xs text-muted-foreground">{contact.title}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {contact.title}
+                          </p>
                         </div>
-                        {getVerificationBadge(contact.verified)}
+                        {(() => {
+                          switch (contact.verified) {
+                            case "verified":
+                              return (
+                                <Badge variant="verified" className="ml-2">
+                                  <CheckCircle className="w-3 h-3 mr-1" />
+                                  Verified
+                                </Badge>
+                              );
+                            case "unverified":
+                              return (
+                                <Badge variant="unverified" className="ml-2">
+                                  <XCircle className="w-3 h-3 mr-1" />
+                                  Unverified
+                                </Badge>
+                              );
+                            case "pending":
+                              return (
+                                <Badge variant="warning" className="ml-2">
+                                  <AlertCircle className="w-3 h-3 mr-1" />
+                                  Pending
+                                </Badge>
+                              );
+                            default:
+                              return null;
+                          }
+                        })()}
                       </div>
 
                       <Separator className="my-2" />
@@ -605,19 +664,19 @@ const Results = () => {
                       <div className="space-y-1">
                         {contact.email && (
                           <div className="flex items-center gap-2 text-xs">
-                            <Mail className="w-3 h-3 text-muted-foreground" />
+                            <Mail className="w-3 h-3" />
                             <span className="text-muted-foreground">{contact.email}</span>
                           </div>
                         )}
                         {contact.phone && (
                           <div className="flex items-center gap-2 text-xs">
-                            <Phone className="w-3 h-3 text-muted-foreground" />
+                            <Phone className="w-3 h-3" />
                             <span className="text-muted-foreground">{contact.phone}</span>
                           </div>
                         )}
                         {contact.linkedin && (
                           <div className="flex items-center gap-2 text-xs">
-                            <Linkedin className="w-3 h-3 text-muted-foreground" />
+                            <Linkedin className="w-3 h-3" />
                             <span className="text-muted-foreground">LinkedIn Profile</span>
                           </div>
                         )}
@@ -648,31 +707,57 @@ const Results = () => {
               ) : (
                 <div className="space-y-4 flex-1 flex flex-col">
                   <div className="space-y-2">
-                    <label className="text-xs font-medium text-muted-foreground">Subject</label>
+                    <label className="text-xs font-medium text-muted-foreground">
+                      Subject
+                    </label>
                     <Input
                       value={messageData.subject}
-                      onChange={(e) => setMessageData((prev) => ({ ...prev, subject: e.target.value }))}
+                      onChange={(e) =>
+                        setMessageData((prev) => ({ ...prev, subject: e.target.value }))
+                      }
                       placeholder="Email subject..."
                       className="text-sm"
                     />
                   </div>
 
                   <div className="space-y-2 flex-1 flex flex-col">
-                    <label className="text-xs font-medium text-muted-foreground">Message</label>
+                    <label className="text-xs font-medium text-muted-foreground">
+                      Message
+                    </label>
                     <Textarea
                       value={messageData.body}
-                      onChange={(e) => setMessageData((prev) => ({ ...prev, body: e.target.value }))}
+                      onChange={(e) =>
+                        setMessageData((prev) => ({ ...prev, body: e.target.value }))
+                      }
                       placeholder="AI-generated personalized message will appear here..."
                       className="flex-1 min-h-[200px] text-sm resize-none"
                     />
                   </div>
 
                   <div className="flex gap-2 pt-2">
-                    <Button variant="outline" size="sm" onClick={handleRegenerateMessage} className="flex-1">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        // placeholder — wire to your generator if/when ready
+                        toast({
+                          title: "Message regenerated",
+                          description: "AI has generated a new personalized message.",
+                        });
+                      }}
+                      className="flex-1"
+                    >
                       <RefreshCw className="w-3 h-3 mr-2" />
                       Regenerate
                     </Button>
-                    <Button size="sm" onClick={handleCopyMessage} className="flex-1">
+                    <Button size="sm" onClick={() => {
+                      const fullMessage = `Subject: ${messageData.subject}\n\n${messageData.body}`;
+                      navigator.clipboard.writeText(fullMessage);
+                      toast({
+                        title: "Message copied to clipboard",
+                        description: "You can now paste it into your email client.",
+                      });
+                    }} className="flex-1">
                       <Copy className="w-3 h-3 mr-2" />
                       Copy Message
                     </Button>
