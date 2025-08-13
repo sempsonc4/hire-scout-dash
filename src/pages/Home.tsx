@@ -37,66 +37,38 @@ const Home = () => {
       form.append("query", searchParams.role.trim());
       form.append("params", JSON.stringify(params));
 
-      // NOTE: this POST will now keep the connection open until the workflow completes,
-      // and respond with { run, jobs }.
+      // POST to n8n start endpoint - expect JWT response
       const res = await fetch("https://n8n.srv930021.hstgr.cloud/webhook/search/start", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: form.toString(),
       });
 
-      // If your Respond node sometimes returns 202, treat like “still running” and show a toast
-      if (res.status === 202) {
-        toast({
-          title: "Still processing…",
-          description: "We’ll take you to results as soon as they’re ready.",
-        });
-      }
-
-      if (!res.ok && res.status !== 202) {
+      if (!res.ok) {
         const txt = await res.text().catch(() => "");
         throw new Error(`Start failed (${res.status}): ${txt || res.statusText}`);
       }
 
-      let data: any = {};
-      try {
-        data = await res.json();
-      } catch {
-        // If backend returned non-JSON on 202 etc.
-        data = {};
+      const data = await res.json();
+      
+      // Expect { run_id, search_id, supabase_jwt, exp }
+      if (!data.run_id || !data.supabase_jwt) {
+        throw new Error("Backend did not return run_id and supabase_jwt");
       }
 
-      // New style (preferred): backend returns { run, jobs }
-      const hasNewPayload = data && data.run && Array.isArray(data.jobs);
-      const runId: string | undefined =
-        (data?.run?.run_id as string | undefined) || (data?.run_id as string | undefined);
-
-      if (hasNewPayload && runId) {
-        // Stash for refresh resilience
-        try {
-          sessionStorage.setItem(`results:${runId}`, JSON.stringify(data));
-        } catch {}
-
-        navigate(
-          `/results?run_id=${encodeURIComponent(runId)}&role=${encodeURIComponent(
-            searchParams.role
-          )}&location=${encodeURIComponent(searchParams.location)}&prefetched=1`,
-          { state: { initial: data } }
-        );
-        return;
-      }
-
-      // Fallback: older behavior returned only { run_id } and expects polling
-      if (runId) {
-        navigate(
-          `/results?run_id=${encodeURIComponent(runId)}&role=${encodeURIComponent(
-            searchParams.role
-          )}&location=${encodeURIComponent(searchParams.location)}`
-        );
-        return;
-      }
-
-      throw new Error("Backend did not return results or a run_id");
+      // Navigate to results with JWT
+      navigate(
+        `/results?run_id=${encodeURIComponent(data.run_id)}&role=${encodeURIComponent(
+          searchParams.role
+        )}&location=${encodeURIComponent(searchParams.location)}`,
+        { 
+          state: { 
+            jwt: data.supabase_jwt, 
+            exp: data.exp,
+            searchId: data.search_id 
+          } 
+        }
+      );
     } catch (err: any) {
       console.error("Search failed:", err);
       toast({

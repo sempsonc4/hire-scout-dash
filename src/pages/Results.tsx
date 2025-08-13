@@ -25,6 +25,8 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { createJWTClient } from "@/lib/supabaseClient";
+import type { Database } from "@/integrations/supabase/types";
 
 // Types for UI
 interface Job {
@@ -34,43 +36,21 @@ interface Job {
   location: string;
   salary?: string;
   datePosted?: string;
-  source?: string; // Company Site | Job Board | Recruiting Agency | Other
+  source?: string;
   url?: string;
 }
 
 type RunPhase = "loading" | "running" | "completed" | "failed";
 
-// n8n GET/POST payload types
-interface N8nRunRow {
-  run_id: string;
-  status: "running" | "completed" | "failed";
-  stop_reason?: string | null;
-  stats?: Record<string, unknown> | null;
-  created_at?: string;
-  updated_at?: string;
-}
+// Database types
+type RunRow = Database['public']['Tables']['runs']['Row'];
+type JobRow = Database['public']['Tables']['jobs']['Row'];
 
-interface N8nJobRow {
-  job_id: string;
-  title?: string | null;
-  company_name?: string | null;
-  location?: string | null;
-  schedule_type?: string | null;
-  salary?: string | null;
-  source?: string | null;
-  source_type?: string | null;
-  link?: string | null;
-  posted_at?: string | null; // 'YYYY-MM-DD' or null
-  scraped_at?: string | null;
-  updated_at?: string | null;
-}
-
-interface N8nResultsPayload {
-  run: N8nRunRow | null;
-  jobs: N8nJobRow[];
-}
-
-type LocationState = { initial?: N8nResultsPayload };
+type LocationState = { 
+  jwt?: string; 
+  exp?: number;
+  searchId?: string;
+};
 
 // Mock contacts/messages (placeholder)
 const mockContacts: Record<
@@ -165,8 +145,10 @@ const Results = () => {
   const [selectedContact, setSelectedContact] = useState<string | null>(null);
   const [messageData, setMessageData] = useState({ subject: "", body: "" });
   const [runStatus, setRunStatus] = useState<RunPhase>("loading");
+  const [runData, setRunData] = useState<RunRow | null>(null);
 
-  const abortRef = useRef<AbortController | null>(null);
+  const supabaseClient = useRef<ReturnType<typeof createJWTClient> | null>(null);
+  const realtimeChannel = useRef<any>(null);
 
   const runId = searchParams.get("run_id") || "";
   const role = searchParams.get("role") || "";
@@ -174,7 +156,7 @@ const Results = () => {
   const isDemo = searchParams.get("demo") === "true";
 
   // Map DB rows -> UI jobs
-  const mapRowsToJobs = (rows: N8nJobRow[]): Job[] =>
+  const mapRowsToJobs = (rows: JobRow[]): Job[] =>
     rows.map((r) => ({
       id: r.job_id,
       title: r.title ?? "",
@@ -186,47 +168,11 @@ const Results = () => {
       url: r.link ?? undefined,
     }));
 
-  // Seed from POST payload (router state or sessionStorage), else fall back to poller
+  // Initialize Supabase client with JWT and fetch initial data
   useEffect(() => {
-    // Try router state first
-    const state = (location.state as LocationState | null)?.initial;
-    if (state?.run && Array.isArray(state.jobs)) {
-      setJobs(mapRowsToJobs(state.jobs));
-      setRunStatus(state.run.status === "completed" ? "completed" : "running");
-      return;
-    }
-
-    // Try sessionStorage (survives refresh)
-    if (runId) {
-      try {
-        const raw = sessionStorage.getItem(`results:${runId}`);
-        if (raw) {
-          const parsed: N8nResultsPayload = JSON.parse(raw);
-          if (parsed?.run && Array.isArray(parsed.jobs)) {
-            setJobs(mapRowsToJobs(parsed.jobs));
-            setRunStatus(parsed.run.status === "completed" ? "completed" : "running");
-            return;
-          }
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    // No preloaded payload → we’ll poll (legacy fallback)
-    setRunStatus("loading");
-  }, [location.state, runId]);
-
-  // One-shot fetch (legacy fallback)
-  async function fetchResultsOnce(signal?: AbortSignal): Promise<{
-    payload: N8nResultsPayload | null;
-    phase: RunPhase;
-    retryAfterMs?: number;
-  }> {
-    // Demo mode
     if (isDemo) {
-      await new Promise((r) => setTimeout(r, 1200));
-      const demo: Job[] = [
+      // Demo mode
+      const demoJobs: Job[] = [
         {
           id: "1",
           title: "Senior Power BI Developer",
@@ -248,120 +194,132 @@ const Results = () => {
           url: "https://example.com/job/2",
         },
       ];
-      setJobs(demo);
-      return { payload: { run: { run_id: "demo", status: "completed" }, jobs: [] }, phase: "completed" };
+      setJobs(demoJobs);
+      setRunStatus("completed");
+      return;
     }
 
-    // If your GET webhook is disabled, this block will simply never be used (we’ll already be “completed” from POST payload)
-    const url = `https://n8n.srv930021.hstgr.cloud/webhook/5ab7ac89-e65e-4dd5-9865-98ea15f47bf8/runs/${encodeURIComponent(
-      runId
-    )}/results`;
-
-    const resp = await fetch(url, { method: "GET", signal });
-
-    if (resp.status === 202) {
-      const retryHeader = resp.headers.get("Retry-After");
-      const retryAfterMs = retryHeader ? Number(retryHeader) * 1000 : undefined;
-      return { payload: null, phase: "running", retryAfterMs };
+    if (!runId) {
+      setRunStatus("failed");
+      return;
     }
 
-    if (!resp.ok) {
-      if (resp.status >= 500 || resp.status === 404) {
-        return { payload: null, phase: "running" };
-      }
-      throw new Error(`HTTP ${resp.status}`);
+    const state = location.state as LocationState | null;
+    const jwt = state?.jwt;
+
+    if (!jwt) {
+      toast({
+        title: "Access token missing",
+        description: "Please start a new search to view results.",
+        variant: "destructive",
+      });
+      navigate("/");
+      return;
     }
 
-    const payload: N8nResultsPayload = await resp.json();
+    // Check if JWT is expired
+    if (state?.exp && Date.now() / 1000 > state.exp) {
+      toast({
+        title: "Session expired",
+        description: "Please start a new search to view results.",
+        variant: "destructive",
+      });
+      navigate("/");
+      return;
+    }
 
-    if (!payload?.run) return { payload, phase: "running" };
+    // Create Supabase client with JWT
+    supabaseClient.current = createJWTClient(jwt);
 
-    const s = payload.run.status;
-    if (s === "completed") return { payload, phase: "completed" };
-    if (s === "failed") return { payload, phase: "failed" };
-    return { payload, phase: "running" };
-  }
-
-  // Backoff poller (legacy fallback only if we didn’t preload anything)
-  async function pollUntilDone() {
-    if (!runId) return;
-
-    // Already have data? Skip.
-    if (runStatus === "completed" && jobs.length > 0) return;
-
-    if (abortRef.current) abortRef.current.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    // small head start so rows exist
-    await new Promise((r) => setTimeout(r, 800));
-
-    let delay = 1500;
-    const maxDelay = 7000;
-    const deadline = Date.now() + 90_000;
-
-    while (!controller.signal.aborted) {
+    // Fetch initial data and set up realtime
+    const initializeData = async () => {
       try {
-        const { payload, phase, retryAfterMs } = await fetchResultsOnce(controller.signal);
+        // Fetch run data
+        const { data: runData, error: runError } = await supabaseClient.current!
+          .from('runs')
+          .select('*')
+          .eq('run_id', runId)
+          .single();
 
-        if (payload?.jobs) {
-          setJobs(mapRowsToJobs(payload.jobs));
-        }
+        if (runError) throw runError;
 
-        setRunStatus(phase);
+        setRunData(runData);
+        setRunStatus(runData.status === 'completed' ? 'completed' : runData.status === 'failed' ? 'failed' : 'running');
 
-        if (phase === "completed") {
-          return;
-        }
-        if (phase === "failed") {
-          toast({
-            title: "Search Failed",
-            description: payload?.run?.stop_reason || "The job search failed. Please try again.",
-            variant: "destructive",
-          });
-          return;
-        }
+        // Fetch jobs
+        const { data: jobsData, error: jobsError } = await supabaseClient.current!
+          .from('jobs')
+          .select('*')
+          .eq('run_id', runId);
 
-        const nextWait = typeof retryAfterMs === "number" ? Math.max(800, retryAfterMs) : delay;
+        if (jobsError) throw jobsError;
 
-        if (Date.now() > deadline) {
-          setRunStatus("running"); // keep soft “collecting” state
-          return;
-        }
+        setJobs(mapRowsToJobs(jobsData || []));
 
-        await new Promise((r) => setTimeout(r, nextWait));
-        delay = Math.min(maxDelay, Math.round(delay * 1.6));
-      } catch (err: any) {
-        console.warn("Polling error, will retry:", err?.message || err);
-        if (Date.now() > deadline) {
-          setRunStatus("failed");
-          toast({
-            title: "Error fetching results",
-            description: "We couldn't fetch results from the server. Please try again.",
-            variant: "destructive",
-          });
-          return;
-        }
-        await new Promise((r) => setTimeout(r, delay));
-        delay = Math.min(maxDelay, Math.round(delay * 1.6));
+        // Set up realtime subscriptions
+        setupRealtime();
+
+      } catch (error: any) {
+        console.error('Error fetching initial data:', error);
+        toast({
+          title: "Error loading results",
+          description: error.message || "Failed to load search results.",
+          variant: "destructive",
+        });
+        setRunStatus("failed");
       }
-    }
-  }
+    };
 
-  // Kick off poll only if we did NOT preload from POST/state/sessionStorage
-  useEffect(() => {
-    if (!runId) return;
-
-    const preloaded = runStatus === "completed" && jobs.length > 0;
-    if (!preloaded) {
-      pollUntilDone();
-    }
+    initializeData();
 
     return () => {
-      if (abortRef.current) abortRef.current.abort();
+      if (realtimeChannel.current) {
+        supabaseClient.current?.removeChannel(realtimeChannel.current);
+      }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId]);
+  }, [runId, location.state, isDemo, navigate, toast]);
+
+  const setupRealtime = () => {
+    if (!supabaseClient.current || !runId) return;
+
+    realtimeChannel.current = supabaseClient.current
+      .channel('search-results')
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'runs',
+          filter: `run_id=eq.${runId}`
+        },
+        (payload) => {
+          const newRun = payload.new as RunRow;
+          setRunData(newRun);
+          setRunStatus(
+            newRun.status === 'completed' ? 'completed' : 
+            newRun.status === 'failed' ? 'failed' : 'running'
+          );
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'jobs',
+          filter: `run_id=eq.${runId}`
+        },
+        (payload) => {
+          const newJob = payload.new as JobRow;
+          setJobs(prev => {
+            const exists = prev.some(job => job.id === newJob.job_id);
+            if (exists) return prev;
+            return [...prev, ...mapRowsToJobs([newJob])];
+          });
+        }
+      )
+      .subscribe();
+  };
 
   // Auto-select first job
   useEffect(() => {
@@ -405,7 +363,6 @@ const Results = () => {
       title: "Message regenerated",
       description: "AI has generated a new personalized message.",
     });
-    // TODO: wire to backend AI compose when available
   };
 
   const getVerificationBadge = (status: string) => {
@@ -499,58 +456,55 @@ const Results = () => {
                 </div>
               ) : jobs.length === 0 ? (
                 <div className="text-center py-8 text-muted-foreground">
-                  <Building2 className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                  <p className="text-sm">No jobs found</p>
+                  <Building2 className="w-8 h-8 mx-auto mb-2" />
+                  <p className="text-sm">No results found</p>
+                  <p className="text-xs mt-1">Try adjusting your search criteria</p>
                 </div>
               ) : (
                 jobs.map((job) => (
                   <Card
                     key={job.id}
-                    className={`cursor-pointer transition-all hover:shadow-professional-sm ${
-                      selectedJob === job.id ? "ring-2 ring-primary" : ""
+                    className={`cursor-pointer transition-all duration-200 hover:shadow-md ${
+                      selectedJob === job.id ? "ring-2 ring-primary shadow-md" : ""
                     }`}
                     onClick={() => setSelectedJob(job.id)}
                   >
                     <CardContent className="p-4">
-                      <div className="space-y-2">
-                        <div className="flex justify-between items-start">
-                          <h3 className="font-semibold text-sm">{job.title}</h3>
-                          {getSourceBadge(job.source)}
+                      <div className="flex justify-between items-start mb-2">
+                        <h3 className="font-medium text-sm leading-tight">{job.title}</h3>
+                        {getSourceBadge(job.source)}
+                      </div>
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2">
+                        <Building2 className="w-3 h-3" />
+                        <span>{job.company}</span>
+                      </div>
+                      {job.location && (
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2">
+                          <MapPin className="w-3 h-3" />
+                          <span>{job.location}</span>
                         </div>
-                        <div className="flex items-center gap-1 text-muted-foreground text-sm">
-                          <Building2 className="w-3 h-3" />
-                          {job.company}
-                        </div>
-                        <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                          <div className="flex items-center gap-1">
-                            <MapPin className="w-3 h-3" />
-                            {job.location}
-                          </div>
+                      )}
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-4">
+                          {job.salary && (
+                            <div className="flex items-center gap-1 text-xs">
+                              <DollarSign className="w-3 h-3 text-green-600" />
+                              <span className="text-green-600 font-medium">{job.salary}</span>
+                            </div>
+                          )}
                           {job.datePosted && (
-                            <div className="flex items-center gap-1">
+                            <div className="flex items-center gap-1 text-xs text-muted-foreground">
                               <Calendar className="w-3 h-3" />
-                              {job.datePosted}
+                              <span>{job.datePosted}</span>
                             </div>
                           )}
                         </div>
-                        {job.salary && (
-                          <div className="flex items-center gap-1 text-xs text-accent font-medium">
-                            <DollarSign className="w-3 h-3" />
-                            {job.salary}
-                          </div>
-                        )}
                         {job.url && (
-                          <div className="pt-1">
-                            <a
-                              href={job.url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              View posting <ExternalLink className="w-3 h-3" />
+                          <Button variant="ghost" size="sm" asChild className="h-6 px-2">
+                            <a href={job.url} target="_blank" rel="noopener noreferrer">
+                              <ExternalLink className="w-3 h-3" />
                             </a>
-                          </div>
+                          </Button>
                         )}
                       </div>
                     </CardContent>
@@ -565,87 +519,64 @@ const Results = () => {
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
                 <Users className="w-4 h-4" />
-                Contacts ({(selectedJob ? mockContacts[selectedJob] || [] : []).length})
+                Contacts ({currentContacts.length})
               </CardTitle>
             </CardHeader>
             <CardContent className="flex-1 overflow-y-auto space-y-3 p-4">
-              {selectedJob ? (
-                (mockContacts[selectedJob] || []).length > 0 ? (
-                  (mockContacts[selectedJob] || []).map((contact) => (
-                    <Card
-                      key={contact.id}
-                      className={`cursor-pointer transition-all hover:shadow-professional-sm ${
-                        selectedContact === contact.id ? "ring-2 ring-primary" : ""
-                      }`}
-                      onClick={() => setSelectedContact(contact.id)}
-                    >
-                      <CardContent className="p-4">
-                        <div className="space-y-2">
-                          <div className="flex items-center justify-between">
-                            <h3 className="font-semibold text-sm">{contact.name}</h3>
-                            {(() => {
-                              switch (contact.verified) {
-                                case "verified":
-                                  return (
-                                    <Badge variant="verified" className="ml-2">
-                                      <CheckCircle className="w-3 h-3 mr-1" />
-                                      Verified
-                                    </Badge>
-                                  );
-                                case "unverified":
-                                  return (
-                                    <Badge variant="unverified" className="ml-2">
-                                      <XCircle className="w-3 h-3 mr-1" />
-                                      Unverified
-                                    </Badge>
-                                  );
-                                case "pending":
-                                  return (
-                                    <Badge variant="warning" className="ml-2">
-                                      <AlertCircle className="w-3 h-3 mr-1" />
-                                      Pending
-                                    </Badge>
-                                  );
-                                default:
-                                  return null;
-                              }
-                            })()}
-                          </div>
-                          <p className="text-sm text-muted-foreground">{contact.title}</p>
-                          <div className="space-y-1">
-                            {contact.email && (
-                              <div className="flex items-center gap-2 text-xs">
-                                <Mail className="w-3 h-3 text-muted-foreground" />
-                                <span className="font-mono">{contact.email}</span>
-                              </div>
-                            )}
-                            {contact.linkedin && (
-                              <div className="flex items-center gap-2 text-xs">
-                                <Linkedin className="w-3 h-3 text-muted-foreground" />
-                                <span className="text-primary">LinkedIn Profile</span>
-                              </div>
-                            )}
-                            {contact.phone && (
-                              <div className="flex items-center gap-2 text-xs">
-                                <Phone className="w-3 h-3 text-muted-foreground" />
-                                <span className="font-mono">{contact.phone}</span>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </CardContent>
-                    </Card>
-                  ))
-                ) : (
-                  <div className="text-center py-8 text-muted-foreground">
-                    <Users className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                    <p className="text-sm">No contacts found for this company</p>
-                  </div>
-                )
-              ) : (
+              {!selectedJob ? (
                 <div className="text-center py-8 text-muted-foreground">
+                  <Users className="w-8 h-8 mx-auto mb-2" />
                   <p className="text-sm">Select a job to view contacts</p>
                 </div>
+              ) : currentContacts.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground">
+                  <Users className="w-8 h-8 mx-auto mb-2" />
+                  <p className="text-sm">No contacts found for this position</p>
+                  <p className="text-xs mt-1">Contact discovery in progress...</p>
+                </div>
+              ) : (
+                currentContacts.map((contact) => (
+                  <Card
+                    key={contact.id}
+                    className={`cursor-pointer transition-all duration-200 hover:shadow-md ${
+                      selectedContact === contact.id ? "ring-2 ring-primary shadow-md" : ""
+                    }`}
+                    onClick={() => setSelectedContact(contact.id)}
+                  >
+                    <CardContent className="p-4">
+                      <div className="flex items-start justify-between mb-2">
+                        <div>
+                          <h3 className="font-medium text-sm">{contact.name}</h3>
+                          <p className="text-xs text-muted-foreground">{contact.title}</p>
+                        </div>
+                        {getVerificationBadge(contact.verified)}
+                      </div>
+
+                      <Separator className="my-2" />
+
+                      <div className="space-y-1">
+                        {contact.email && (
+                          <div className="flex items-center gap-2 text-xs">
+                            <Mail className="w-3 h-3 text-muted-foreground" />
+                            <span className="text-muted-foreground">{contact.email}</span>
+                          </div>
+                        )}
+                        {contact.phone && (
+                          <div className="flex items-center gap-2 text-xs">
+                            <Phone className="w-3 h-3 text-muted-foreground" />
+                            <span className="text-muted-foreground">{contact.phone}</span>
+                          </div>
+                        )}
+                        {contact.linkedin && (
+                          <div className="flex items-center gap-2 text-xs">
+                            <Linkedin className="w-3 h-3 text-muted-foreground" />
+                            <span className="text-muted-foreground">LinkedIn Profile</span>
+                          </div>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))
               )}
             </CardContent>
           </Card>
@@ -655,50 +586,48 @@ const Results = () => {
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
                 <Mail className="w-4 h-4" />
-                AI Generated Message
+                AI-Generated Message
               </CardTitle>
             </CardHeader>
-            <CardContent className="flex-1 flex flex-col space-y-4 p-4">
-              {selectedContact ? (
-                <>
+            <CardContent className="flex-1 flex flex-col p-4">
+              {!selectedContact ? (
+                <div className="text-center py-8 text-muted-foreground flex-1 flex items-center justify-center">
+                  <div>
+                    <Mail className="w-8 h-8 mx-auto mb-2" />
+                    <p className="text-sm">Select a contact to generate a message</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4 flex-1 flex flex-col">
                   <div className="space-y-2">
-                    <label className="text-sm font-medium">Subject Line</label>
+                    <label className="text-xs font-medium text-muted-foreground">Subject</label>
                     <Input
                       value={messageData.subject}
                       onChange={(e) => setMessageData((prev) => ({ ...prev, subject: e.target.value }))}
-                      placeholder="Subject line..."
+                      placeholder="Email subject..."
+                      className="text-sm"
                     />
                   </div>
 
-                  <div className="flex-1 space-y-2">
-                    <label className="text-sm font-medium">Message</label>
+                  <div className="space-y-2 flex-1 flex flex-col">
+                    <label className="text-xs font-medium text-muted-foreground">Message</label>
                     <Textarea
                       value={messageData.body}
                       onChange={(e) => setMessageData((prev) => ({ ...prev, body: e.target.value }))}
-                      placeholder="Your personalized message will appear here..."
-                      className="min-h-[300px] resize-none"
+                      placeholder="AI-generated personalized message will appear here..."
+                      className="flex-1 min-h-[200px] text-sm resize-none"
                     />
                   </div>
 
-                  <Separator />
-
-                  <div className="space-y-3">
-                    <Button onClick={handleRegenerateMessage} variant="outline" className="w-full">
-                      <RefreshCw className="w-4 h-4 mr-2" />
-                      Regenerate Message
+                  <div className="flex gap-2 pt-2">
+                    <Button variant="outline" size="sm" onClick={handleRegenerateMessage} className="flex-1">
+                      <RefreshCw className="w-3 h-3 mr-2" />
+                      Regenerate
                     </Button>
-
-                    <Button onClick={handleCopyMessage} variant="default" className="w-full" disabled={!messageData.subject || !messageData.body}>
-                      <Copy className="w-4 h-4 mr-2" />
-                      Copy to Clipboard
+                    <Button size="sm" onClick={handleCopyMessage} className="flex-1">
+                      <Copy className="w-3 h-3 mr-2" />
+                      Copy Message
                     </Button>
-                  </div>
-                </>
-              ) : (
-                <div className="flex-1 flex items-center justify-center text-center text-muted-foreground">
-                  <div>
-                    <Mail className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                    <p className="text-sm">Select a contact to generate a message</p>
                   </div>
                 </div>
               )}

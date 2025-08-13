@@ -618,6 +618,7 @@ export type Database = {
           stats: Json
           status: string
           updated_at: string
+          view_token: string | null
         }
         Insert: {
           created_at?: string
@@ -628,6 +629,7 @@ export type Database = {
           stats?: Json
           status?: string
           updated_at?: string
+          view_token?: string | null
         }
         Update: {
           created_at?: string
@@ -638,6 +640,7 @@ export type Database = {
           stats?: Json
           status?: string
           updated_at?: string
+          view_token?: string | null
         }
         Relationships: [
           {
