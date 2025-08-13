@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { useSearchParams, useNavigate } from "react-router-dom";
+import { useSearchParams, useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -22,7 +22,7 @@ import {
   AlertCircle,
   XCircle,
   Loader2,
-  ExternalLink
+  ExternalLink,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -34,13 +34,13 @@ interface Job {
   location: string;
   salary?: string;
   datePosted?: string;
-  source?: string;   // Company Site | Job Board | Recruiting Agency | Other
+  source?: string; // Company Site | Job Board | Recruiting Agency | Other
   url?: string;
 }
 
 type RunPhase = "loading" | "running" | "completed" | "failed";
 
-// n8n GET response types
+// n8n GET/POST payload types
 interface N8nRunRow {
   run_id: string;
   status: "running" | "completed" | "failed";
@@ -60,7 +60,7 @@ interface N8nJobRow {
   source?: string | null;
   source_type?: string | null;
   link?: string | null;
-  posted_at?: string | null;  // 'YYYY-MM-DD' or null
+  posted_at?: string | null; // 'YYYY-MM-DD' or null
   scraped_at?: string | null;
   updated_at?: string | null;
 }
@@ -70,6 +70,9 @@ interface N8nResultsPayload {
   jobs: N8nJobRow[];
 }
 
+type LocationState = { initial?: N8nResultsPayload };
+
+// Mock contacts/messages (placeholder)
 const mockContacts: Record<
   string,
   Array<{
@@ -154,6 +157,7 @@ Best`,
 const Results = () => {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const { toast } = useToast();
 
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -166,7 +170,7 @@ const Results = () => {
 
   const runId = searchParams.get("run_id") || "";
   const role = searchParams.get("role") || "";
-  const location = searchParams.get("location") || "";
+  const loc = searchParams.get("location") || "";
   const isDemo = searchParams.get("demo") === "true";
 
   // Map DB rows -> UI jobs
@@ -182,7 +186,38 @@ const Results = () => {
       url: r.link ?? undefined,
     }));
 
-  // One-shot fetch with semantics: returns { payload, phase, retryAfterMs }
+  // Seed from POST payload (router state or sessionStorage), else fall back to poller
+  useEffect(() => {
+    // Try router state first
+    const state = (location.state as LocationState | null)?.initial;
+    if (state?.run && Array.isArray(state.jobs)) {
+      setJobs(mapRowsToJobs(state.jobs));
+      setRunStatus(state.run.status === "completed" ? "completed" : "running");
+      return;
+    }
+
+    // Try sessionStorage (survives refresh)
+    if (runId) {
+      try {
+        const raw = sessionStorage.getItem(`results:${runId}`);
+        if (raw) {
+          const parsed: N8nResultsPayload = JSON.parse(raw);
+          if (parsed?.run && Array.isArray(parsed.jobs)) {
+            setJobs(mapRowsToJobs(parsed.jobs));
+            setRunStatus(parsed.run.status === "completed" ? "completed" : "running");
+            return;
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // No preloaded payload → we’ll poll (legacy fallback)
+    setRunStatus("loading");
+  }, [location.state, runId]);
+
+  // One-shot fetch (legacy fallback)
   async function fetchResultsOnce(signal?: AbortSignal): Promise<{
     payload: N8nResultsPayload | null;
     phase: RunPhase;
@@ -191,7 +226,7 @@ const Results = () => {
     // Demo mode
     if (isDemo) {
       await new Promise((r) => setTimeout(r, 1200));
-      const mockJobs: Job[] = [
+      const demo: Job[] = [
         {
           id: "1",
           title: "Senior Power BI Developer",
@@ -213,17 +248,17 @@ const Results = () => {
           url: "https://example.com/job/2",
         },
       ];
-      setJobs(mockJobs);
+      setJobs(demo);
       return { payload: { run: { run_id: "demo", status: "completed" }, jobs: [] }, phase: "completed" };
     }
 
+    // If your GET webhook is disabled, this block will simply never be used (we’ll already be “completed” from POST payload)
     const url = `https://n8n.srv930021.hstgr.cloud/webhook/5ab7ac89-e65e-4dd5-9865-98ea15f47bf8/runs/${encodeURIComponent(
       runId
     )}/results`;
 
     const resp = await fetch(url, { method: "GET", signal });
 
-    // 202 → still running (our backend may return this while collecting)
     if (resp.status === 202) {
       const retryHeader = resp.headers.get("Retry-After");
       const retryAfterMs = retryHeader ? Number(retryHeader) * 1000 : undefined;
@@ -231,12 +266,7 @@ const Results = () => {
     }
 
     if (!resp.ok) {
-      // Treat transient 5xx as running; only 4xx should fail immediately
-      if (resp.status >= 500) {
-        return { payload: null, phase: "running" };
-      }
-      // 404 right after start often means DB not populated yet → treat as running
-      if (resp.status === 404) {
+      if (resp.status >= 500 || resp.status === 404) {
         return { payload: null, phase: "running" };
       }
       throw new Error(`HTTP ${resp.status}`);
@@ -244,40 +274,31 @@ const Results = () => {
 
     const payload: N8nResultsPayload = await resp.json();
 
-    // If run is missing or status is running → still in progress
-    if (!payload?.run) {
-      return { payload, phase: "running" };
-    }
+    if (!payload?.run) return { payload, phase: "running" };
 
     const s = payload.run.status;
-    if (s === "running") return { payload, phase: "running" };
     if (s === "completed") return { payload, phase: "completed" };
     if (s === "failed") return { payload, phase: "failed" };
-
-    // Fallback (shouldn't happen)
     return { payload, phase: "running" };
   }
 
-  // Backoff long-poller with a soft deadline
+  // Backoff poller (legacy fallback only if we didn’t preload anything)
   async function pollUntilDone() {
     if (!runId) return;
 
-    // cancel any prior poller
-    if (abortRef.current) {
-      abortRef.current.abort();
-    }
+    // Already have data? Skip.
+    if (runStatus === "completed" && jobs.length > 0) return;
+
+    if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
-    setRunStatus("loading");
-    setJobs([]);
-
-    // small head start so the DB rows exist
+    // small head start so rows exist
     await new Promise((r) => setTimeout(r, 800));
 
-    let delay = 1500;          // start at 1.5s
-    const maxDelay = 7000;     // cap at 7s between polls
-    const deadline = Date.now() + 90_000; // ~90s overall
+    let delay = 1500;
+    const maxDelay = 7000;
+    const deadline = Date.now() + 90_000;
 
     while (!controller.signal.aborted) {
       try {
@@ -301,22 +322,16 @@ const Results = () => {
           return;
         }
 
-        // running — decide next wait
-        const nextWait =
-          typeof retryAfterMs === "number"
-            ? Math.max(800, retryAfterMs)
-            : delay;
+        const nextWait = typeof retryAfterMs === "number" ? Math.max(800, retryAfterMs) : delay;
 
         if (Date.now() > deadline) {
-          // stop trying; surface whatever we have
-          setRunStatus("running"); // keep UI in “collecting” state instead of hard fail
+          setRunStatus("running"); // keep soft “collecting” state
           return;
         }
 
         await new Promise((r) => setTimeout(r, nextWait));
         delay = Math.min(maxDelay, Math.round(delay * 1.6));
       } catch (err: any) {
-        // Network hiccup: retry until deadline; only show hard error if truly unrecoverable
         console.warn("Polling error, will retry:", err?.message || err);
         if (Date.now() > deadline) {
           setRunStatus("failed");
@@ -333,10 +348,15 @@ const Results = () => {
     }
   }
 
-  // Kick off poll when runId changes
+  // Kick off poll only if we did NOT preload from POST/state/sessionStorage
   useEffect(() => {
     if (!runId) return;
-    pollUntilDone();
+
+    const preloaded = runStatus === "completed" && jobs.length > 0;
+    if (!preloaded) {
+      pollUntilDone();
+    }
+
     return () => {
       if (abortRef.current) abortRef.current.abort();
     };
@@ -416,8 +436,7 @@ const Results = () => {
     }
   };
 
-  const getSourceBadge = (source?: string) =>
-    source ? <Badge variant="source">{source}</Badge> : null;
+  const getSourceBadge = (source?: string) => (source ? <Badge variant="source">{source}</Badge> : null);
 
   const currentContacts = selectedJob ? mockContacts[selectedJob] || [] : [];
 
@@ -435,11 +454,11 @@ const Results = () => {
               <div>
                 <h1 className="text-lg font-semibold">Search Results</h1>
                 <p className="text-sm text-muted-foreground">
-                  {role} • {location} •{" "}
+                  {role} • {loc} •{" "}
                   {runStatus === "completed"
                     ? `${jobs.length} results`
                     : runStatus === "running" || runStatus === "loading"
-                    ? "Searching..."
+                    ? "Processing..."
                     : "Failed"}
                 </p>
               </div>
@@ -467,19 +486,14 @@ const Results = () => {
               {runStatus === "loading" || runStatus === "running" ? (
                 <div className="text-center py-8 text-muted-foreground">
                   <Loader2 className="w-8 h-8 mx-auto mb-2 animate-spin" />
-                  <p className="text-sm">Searching for jobs...</p>
+                  <p className="text-sm">Processing results...</p>
                   <p className="text-xs mt-1">This may take a few moments</p>
                 </div>
               ) : runStatus === "failed" ? (
                 <div className="text-center py-8 text-muted-foreground">
                   <XCircle className="w-8 h-8 mx-auto mb-2 text-destructive" />
                   <p className="text-sm">Search failed</p>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="mt-2"
-                    onClick={() => navigate("/")}
-                  >
+                  <Button variant="outline" size="sm" className="mt-2" onClick={() => navigate("/")}>
                     Try Again
                   </Button>
                 </div>
@@ -551,13 +565,13 @@ const Results = () => {
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
                 <Users className="w-4 h-4" />
-                Contacts ({currentContacts.length})
+                Contacts ({(selectedJob ? mockContacts[selectedJob] || [] : []).length})
               </CardTitle>
             </CardHeader>
             <CardContent className="flex-1 overflow-y-auto space-y-3 p-4">
               {selectedJob ? (
-                currentContacts.length > 0 ? (
-                  currentContacts.map((contact) => (
+                (mockContacts[selectedJob] || []).length > 0 ? (
+                  (mockContacts[selectedJob] || []).map((contact) => (
                     <Card
                       key={contact.id}
                       className={`cursor-pointer transition-all hover:shadow-professional-sm ${
@@ -569,7 +583,33 @@ const Results = () => {
                         <div className="space-y-2">
                           <div className="flex items-center justify-between">
                             <h3 className="font-semibold text-sm">{contact.name}</h3>
-                            {getVerificationBadge(contact.verified)}
+                            {(() => {
+                              switch (contact.verified) {
+                                case "verified":
+                                  return (
+                                    <Badge variant="verified" className="ml-2">
+                                      <CheckCircle className="w-3 h-3 mr-1" />
+                                      Verified
+                                    </Badge>
+                                  );
+                                case "unverified":
+                                  return (
+                                    <Badge variant="unverified" className="ml-2">
+                                      <XCircle className="w-3 h-3 mr-1" />
+                                      Unverified
+                                    </Badge>
+                                  );
+                                case "pending":
+                                  return (
+                                    <Badge variant="warning" className="ml-2">
+                                      <AlertCircle className="w-3 h-3 mr-1" />
+                                      Pending
+                                    </Badge>
+                                  );
+                                default:
+                                  return null;
+                              }
+                            })()}
                           </div>
                           <p className="text-sm text-muted-foreground">{contact.title}</p>
                           <div className="space-y-1">
@@ -625,16 +665,16 @@ const Results = () => {
                     <label className="text-sm font-medium">Subject Line</label>
                     <Input
                       value={messageData.subject}
-                      onChange={(e) => setMessageData(prev => ({ ...prev, subject: e.target.value }))}
+                      onChange={(e) => setMessageData((prev) => ({ ...prev, subject: e.target.value }))}
                       placeholder="Subject line..."
                     />
                   </div>
-                  
+
                   <div className="flex-1 space-y-2">
                     <label className="text-sm font-medium">Message</label>
                     <Textarea
                       value={messageData.body}
-                      onChange={(e) => setMessageData(prev => ({ ...prev, body: e.target.value }))}
+                      onChange={(e) => setMessageData((prev) => ({ ...prev, body: e.target.value }))}
                       placeholder="Your personalized message will appear here..."
                       className="min-h-[300px] resize-none"
                     />
@@ -643,21 +683,12 @@ const Results = () => {
                   <Separator />
 
                   <div className="space-y-3">
-                    <Button
-                      onClick={handleRegenerateMessage}
-                      variant="outline"
-                      className="w-full"
-                    >
+                    <Button onClick={handleRegenerateMessage} variant="outline" className="w-full">
                       <RefreshCw className="w-4 h-4 mr-2" />
                       Regenerate Message
                     </Button>
-                    
-                    <Button
-                      onClick={handleCopyMessage}
-                      variant="default"
-                      className="w-full"
-                      disabled={!messageData.subject || !messageData.body}
-                    >
+
+                    <Button onClick={handleCopyMessage} variant="default" className="w-full" disabled={!messageData.subject || !messageData.body}>
                       <Copy className="w-4 h-4 mr-2" />
                       Copy to Clipboard
                     </Button>
