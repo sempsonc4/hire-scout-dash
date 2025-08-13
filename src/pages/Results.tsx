@@ -28,7 +28,7 @@ import { useToast } from "@/hooks/use-toast";
 import { createJWTClient } from "@/lib/supabaseClient";
 import type { Database } from "@/integrations/supabase/types";
 
-// Types for UI
+// UI types
 interface Job {
   id: string;
   title: string;
@@ -42,17 +42,18 @@ interface Job {
 
 type RunPhase = "loading" | "running" | "completed" | "failed";
 
-// Database types
-type RunRow = Database['public']['Tables']['runs']['Row'];
-type JobRow = Database['public']['Tables']['jobs']['Row'];
+// DB types
+type RunRow = Database["public"]["Tables"]["runs"]["Row"];
+type JobRow = Database["public"]["Tables"]["jobs"]["Row"];
 
-type LocationState = { 
-  jwt?: string; 
-  exp?: number;
+type LocationState = {
+  jwt?: string;
+  exp?: number;       // unix seconds
   searchId?: string;
+  // viewToken?: string; // not strictly needed on frontend
 };
 
-// Mock contacts/messages (placeholder)
+// ---- Mock contacts/messages (unchanged) ----
 const mockContacts: Record<
   string,
   Array<{
@@ -134,6 +135,19 @@ Best`,
   },
 };
 
+// ----- Helpers -----
+const mapRowsToJobs = (rows: JobRow[] = []): Job[] =>
+  rows.map((r) => ({
+    id: r.job_id!,
+    title: r.title ?? "",
+    company: r.company_name ?? "",
+    location: r.location ?? "",
+    salary: r.salary ?? undefined,
+    datePosted: r.posted_at ?? undefined,
+    source: r.source_type ?? r.source ?? undefined,
+    url: r.link ?? undefined,
+  }));
+
 const Results = () => {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -148,30 +162,17 @@ const Results = () => {
   const [runData, setRunData] = useState<RunRow | null>(null);
 
   const supabaseClient = useRef<ReturnType<typeof createJWTClient> | null>(null);
-  const realtimeChannel = useRef<any>(null);
+  const realtimeChannel = useRef<ReturnType<NonNullable<typeof supabaseClient.current>["channel"]> | null>(null);
+  const oneShotPollTimeout = useRef<number | null>(null);
 
   const runId = searchParams.get("run_id") || "";
   const role = searchParams.get("role") || "";
   const loc = searchParams.get("location") || "";
   const isDemo = searchParams.get("demo") === "true";
 
-  // Map DB rows -> UI jobs
-  const mapRowsToJobs = (rows: JobRow[]): Job[] =>
-    rows.map((r) => ({
-      id: r.job_id,
-      title: r.title ?? "",
-      company: r.company_name ?? "",
-      location: r.location ?? "",
-      salary: r.salary ?? undefined,
-      datePosted: r.posted_at ?? undefined,
-      source: r.source_type ?? r.source ?? undefined,
-      url: r.link ?? undefined,
-    }));
-
   // Initialize Supabase client with JWT and fetch initial data
   useEffect(() => {
     if (isDemo) {
-      // Demo mode
       const demoJobs: Job[] = [
         {
           id: "1",
@@ -217,7 +218,7 @@ const Results = () => {
       return;
     }
 
-    // Check if JWT is expired
+    // Expiry check
     if (state?.exp && Date.now() / 1000 > state.exp) {
       toast({
         title: "Session expired",
@@ -228,39 +229,62 @@ const Results = () => {
       return;
     }
 
-    // Create Supabase client with JWT
+    // Create per-run Supabase client with the scoped JWT
     supabaseClient.current = createJWTClient(jwt);
 
-    // Fetch initial data and set up realtime
     const initializeData = async () => {
       try {
-        // Fetch run data
-        const { data: runData, error: runError } = await supabaseClient.current!
-          .from('runs')
-          .select('*')
-          .eq('run_id', runId)
+        // Fetch run
+        const { data: runRow, error: runError } = await supabaseClient.current!
+          .from("runs")
+          .select("*")
+          .eq("run_id", runId)
           .single();
 
         if (runError) throw runError;
 
-        setRunData(runData);
-        setRunStatus(runData.status === 'completed' ? 'completed' : runData.status === 'failed' ? 'failed' : 'running');
+        setRunData(runRow);
+        setRunStatus(
+          runRow.status === "completed"
+            ? "completed"
+            : runRow.status === "failed"
+            ? "failed"
+            : "running"
+        );
 
-        // Fetch jobs
-        const { data: jobsData, error: jobsError } = await supabaseClient.current!
-          .from('jobs')
-          .select('*')
-          .eq('run_id', runId);
+        // Fetch initial jobs
+        const { data: jobRows, error: jobsError } = await supabaseClient.current!
+          .from("jobs")
+          .select("*")
+          .eq("run_id", runId)
+          .order("updated_at", { ascending: false });
 
         if (jobsError) throw jobsError;
 
-        setJobs(mapRowsToJobs(jobsData || []));
+        const initialJobs = mapRowsToJobs(jobRows || []);
+        setJobs(initialJobs);
 
-        // Set up realtime subscriptions
+        // Setup realtime
         setupRealtime();
 
+        // One-shot fallback: if after 5s we still have no jobs, try one more fetch
+        if (initialJobs.length === 0) {
+          oneShotPollTimeout.current = window.setTimeout(async () => {
+            try {
+              const { data: rows } = await supabaseClient.current!
+                .from("jobs")
+                .select("*")
+                .eq("run_id", runId)
+                .order("updated_at", { ascending: false });
+
+              if (rows && rows.length > 0) {
+                setJobs(mapRowsToJobs(rows));
+              }
+            } catch {}
+          }, 5000);
+        }
       } catch (error: any) {
-        console.error('Error fetching initial data:', error);
+        console.error("Error fetching initial data:", error);
         toast({
           title: "Error loading results",
           description: error.message || "Failed to load search results.",
@@ -273,8 +297,14 @@ const Results = () => {
     initializeData();
 
     return () => {
+      // Cleanup channel and timer
       if (realtimeChannel.current) {
         supabaseClient.current?.removeChannel(realtimeChannel.current);
+        realtimeChannel.current = null;
+      }
+      if (oneShotPollTimeout.current) {
+        window.clearTimeout(oneShotPollTimeout.current);
+        oneShotPollTimeout.current = null;
       }
     };
   }, [runId, location.state, isDemo, navigate, toast]);
@@ -282,66 +312,58 @@ const Results = () => {
   const setupRealtime = () => {
     if (!supabaseClient.current || !runId) return;
 
-    console.log('Setting up realtime subscriptions for run_id:', runId);
+    console.log("Setting up realtime subscriptions for run_id:", runId);
 
-    realtimeChannel.current = supabaseClient.current
-      .channel('search-results')
+    const channel = supabaseClient.current
+      .channel(`run_${runId}`)
+      // Runs status updates
       .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'runs',
-          filter: `run_id=eq.${runId}`
-        },
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "runs", filter: `run_id=eq.${runId}` },
         (payload) => {
           const newRun = payload.new as RunRow;
-          console.log('Received run update:', newRun);
           setRunData(newRun);
           setRunStatus(
-            newRun.status === 'completed' ? 'completed' : 
-            newRun.status === 'failed' ? 'failed' : 'running'
+            newRun.status === "completed"
+              ? "completed"
+              : newRun.status === "failed"
+              ? "failed"
+              : "running"
           );
         }
       )
+      // New jobs inserted
       .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'jobs',
-          filter: `run_id=eq.${runId}`
-        },
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "jobs", filter: `run_id=eq.${runId}` },
         (payload) => {
-          const newJob = payload.new as JobRow;
-          console.log('Received new job:', newJob);
-          setJobs(prev => {
-            const exists = prev.some(job => job.id === newJob.job_id);
-            if (exists) return prev;
-            return [...prev, ...mapRowsToJobs([newJob])];
-          });
+          const row = payload.new as JobRow;
+          setJobs((prev) =>
+            prev.some((j) => j.id === row.job_id)
+              ? prev
+              : [...mapRowsToJobs([row]), ...prev]
+          );
+        }
+      )
+      // Existing jobs updated (covers ON CONFLICT DO UPDATE)
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "jobs", filter: `run_id=eq.${runId}` },
+        (payload) => {
+          const row = payload.new as JobRow;
+          setJobs((prev) =>
+            prev.map((j) => (j.id === row.job_id ? mapRowsToJobs([row])[0] : j))
+          );
         }
       )
       .subscribe((status) => {
-        console.log('Realtime subscription status:', status);
-        if (status === 'SUBSCRIBED') {
-          console.log('Successfully subscribed to realtime updates');
-        } else if (status === 'CHANNEL_ERROR') {
-          console.error('Realtime subscription error');
+        console.log("Realtime subscription status:", status);
+        if (status === "CHANNEL_ERROR") {
+          console.error("Realtime subscription error");
         }
       });
 
-    // Also poll for updates as a fallback
-    const pollInterval = setInterval(async () => {
-      if (runStatus === 'completed' || runStatus === 'failed') {
-        clearInterval(pollInterval);
-        return;
-      }
-      
-      await fetchLatestJobs();
-    }, 5000); // Poll every 5 seconds
-
-    return () => clearInterval(pollInterval);
+    realtimeChannel.current = channel;
   };
 
   // Auto-select first job
@@ -371,36 +393,6 @@ const Results = () => {
       setMessageData({ subject: "", body: "" });
     }
   }, [selectedContact]);
-
-  // Function to fetch latest jobs as fallback
-  const fetchLatestJobs = async () => {
-    if (!supabaseClient.current || !runId) return;
-
-    try {
-      const { data: jobsData, error } = await supabaseClient.current
-        .from('jobs')
-        .select('*')
-        .eq('run_id', runId)
-        .order('created_at', { ascending: false });
-
-      if (error) {
-        console.error('Error fetching jobs:', error);
-        return;
-      }
-
-      const newJobs = mapRowsToJobs(jobsData || []);
-      setJobs(prev => {
-        // Only update if we have new jobs
-        if (newJobs.length !== prev.length) {
-          console.log(`Updated jobs: ${prev.length} -> ${newJobs.length}`);
-          return newJobs;
-        }
-        return prev;
-      });
-    } catch (error) {
-      console.error('Error in fetchLatestJobs:', error);
-    }
-  };
 
   const handleCopyMessage = () => {
     const fullMessage = `Subject: ${messageData.subject}\n\n${messageData.body}`;
@@ -446,7 +438,8 @@ const Results = () => {
     }
   };
 
-  const getSourceBadge = (source?: string) => (source ? <Badge variant="source">{source}</Badge> : null);
+  const getSourceBadge = (source?: string) =>
+    source ? <Badge variant="source">{source}</Badge> : null;
 
   const currentContacts = selectedJob ? mockContacts[selectedJob] || [] : [];
 
@@ -467,9 +460,10 @@ const Results = () => {
                   {role} • {loc} •{" "}
                   {runStatus === "completed"
                     ? `${jobs.length} results`
-                    : runStatus === "running" || runStatus === "loading"
-                    ? "Processing..."
-                    : "Failed"}
+                    : runStatus === "failed"
+                    ? "Failed"
+                    : // Show progress copy while still rendering incremental results
+                      `Processing${jobs.length ? ` • ${jobs.length} found so far` : "..."}`}
                 </p>
               </div>
             </div>
@@ -493,7 +487,8 @@ const Results = () => {
               </CardTitle>
             </CardHeader>
             <CardContent className="flex-1 overflow-y-auto space-y-3 p-4">
-              {runStatus === "loading" || runStatus === "running" ? (
+              {/* Show skeleton only when loading/running AND we have no jobs yet */}
+              {(runStatus === "loading" || runStatus === "running") && jobs.length === 0 ? (
                 <div className="text-center py-8 text-muted-foreground">
                   <Loader2 className="w-8 h-8 mx-auto mb-2 animate-spin" />
                   <p className="text-sm">Processing results...</p>
@@ -572,7 +567,7 @@ const Results = () => {
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
                 <Users className="w-4 h-4" />
-                Contacts ({currentContacts.length})
+                Contacts ({(selectedJob ? mockContacts[selectedJob] || [] : []).length})
               </CardTitle>
             </CardHeader>
             <CardContent className="flex-1 overflow-y-auto space-y-3 p-4">
@@ -581,14 +576,14 @@ const Results = () => {
                   <Users className="w-8 h-8 mx-auto mb-2" />
                   <p className="text-sm">Select a job to view contacts</p>
                 </div>
-              ) : currentContacts.length === 0 ? (
+              ) : (mockContacts[selectedJob] || []).length === 0 ? (
                 <div className="text-center py-8 text-muted-foreground">
                   <Users className="w-8 h-8 mx-auto mb-2" />
                   <p className="text-sm">No contacts found for this position</p>
                   <p className="text-xs mt-1">Contact discovery in progress...</p>
                 </div>
               ) : (
-                currentContacts.map((contact) => (
+                (mockContacts[selectedJob] || []).map((contact) => (
                   <Card
                     key={contact.id}
                     className={`cursor-pointer transition-all duration-200 hover:shadow-md ${
