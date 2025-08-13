@@ -14,72 +14,100 @@ const Home = () => {
   const [searchParams, setSearchParams] = useState({
     role: "",
     location: "Minneapolis, MN",
-    maxResults: "100"
+    maxResults: "100",
   });
 
   const handleSearch = async (e: React.FormEvent) => {
-  e.preventDefault();
-  if (!searchParams.role.trim()) return;
+    e.preventDefault();
+    if (!searchParams.role.trim()) return;
 
-  setIsLoading(true);
+    setIsLoading(true);
 
-  try {
-    // Send form-encoded with the exact keys n8n expects:
-    //  - query  (string)
-    //  - params (JSON string with location/max_results/etc.)
-    const params = {
-      location: searchParams.location,
-      max_results: Number(searchParams.maxResults) || 100,
-      max_pages: 10,
-      absolute_max_results: 200,
-      enable_safeguards: true,
-    };
+    try {
+      // Build the exact keys the n8n webhook expects
+      const params = {
+        location: searchParams.location,
+        max_results: Number(searchParams.maxResults) || 100,
+        max_pages: 10,
+        absolute_max_results: 200,
+        enable_safeguards: true,
+      };
 
-    const form = new URLSearchParams();
-    form.append("query", searchParams.role.trim());
-    form.append("params", JSON.stringify(params));
+      const form = new URLSearchParams();
+      form.append("query", searchParams.role.trim());
+      form.append("params", JSON.stringify(params));
 
-    const res = await fetch(
-      "https://n8n.srv930021.hstgr.cloud/webhook/search/start",
-      {
+      // NOTE: this POST will now keep the connection open until the workflow completes,
+      // and respond with { run, jobs }.
+      const res = await fetch("https://n8n.srv930021.hstgr.cloud/webhook/search/start", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: form.toString(),
+      });
+
+      // If your Respond node sometimes returns 202, treat like “still running” and show a toast
+      if (res.status === 202) {
+        toast({
+          title: "Still processing…",
+          description: "We’ll take you to results as soon as they’re ready.",
+        });
       }
-    );
 
-    if (!res.ok) {
-      const txt = await res.text().catch(() => "");
-      throw new Error(`Start failed (${res.status}): ${txt || res.statusText}`);
+      if (!res.ok && res.status !== 202) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`Start failed (${res.status}): ${txt || res.statusText}`);
+      }
+
+      let data: any = {};
+      try {
+        data = await res.json();
+      } catch {
+        // If backend returned non-JSON on 202 etc.
+        data = {};
+      }
+
+      // New style (preferred): backend returns { run, jobs }
+      const hasNewPayload = data && data.run && Array.isArray(data.jobs);
+      const runId: string | undefined =
+        (data?.run?.run_id as string | undefined) || (data?.run_id as string | undefined);
+
+      if (hasNewPayload && runId) {
+        // Stash for refresh resilience
+        try {
+          sessionStorage.setItem(`results:${runId}`, JSON.stringify(data));
+        } catch {}
+
+        navigate(
+          `/results?run_id=${encodeURIComponent(runId)}&role=${encodeURIComponent(
+            searchParams.role
+          )}&location=${encodeURIComponent(searchParams.location)}&prefetched=1`,
+          { state: { initial: data } }
+        );
+        return;
+      }
+
+      // Fallback: older behavior returned only { run_id } and expects polling
+      if (runId) {
+        navigate(
+          `/results?run_id=${encodeURIComponent(runId)}&role=${encodeURIComponent(
+            searchParams.role
+          )}&location=${encodeURIComponent(searchParams.location)}`
+        );
+        return;
+      }
+
+      throw new Error("Backend did not return results or a run_id");
+    } catch (err: any) {
+      console.error("Search failed:", err);
+      toast({
+        title: "Search Failed",
+        description: err?.message || "Unable to start job search. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
     }
-
-    const data = await res.json();
-
-    if (!data?.run_id) {
-      throw new Error("Backend did not return a run_id");
-    }
-
-    navigate(
-      `/results?run_id=${encodeURIComponent(
-        data.run_id
-      )}&role=${encodeURIComponent(searchParams.role)}&location=${encodeURIComponent(
-        searchParams.location
-      )}`
-    );
-  } catch (err: any) {
-    console.error("Search failed:", err);
-    toast({
-      title: "Search Failed",
-      description:
-        err?.message || "Unable to start job search. Please try again.",
-      variant: "destructive",
-    });
-  } finally {
-    setIsLoading(false);
-  }
-};
+  };
 
   return (
     <div className="min-h-screen bg-gradient-surface">
@@ -98,9 +126,7 @@ const Home = () => {
       {/* Main Content */}
       <main className="container mx-auto px-4 py-16">
         <div className="max-w-2xl mx-auto text-center mb-12">
-          <h2 className="text-4xl font-bold text-foreground mb-4">
-            Find Your Next Opportunity
-          </h2>
+          <h2 className="text-4xl font-bold text-foreground mb-4">Find Your Next Opportunity</h2>
           <p className="text-lg text-muted-foreground">
             Search for jobs, discover contacts, and craft personalized outreach messages with AI assistance.
           </p>
@@ -112,9 +138,7 @@ const Home = () => {
               <Search className="w-5 h-5 text-primary" />
               Start Your Job Search
             </CardTitle>
-            <CardDescription>
-              Enter your target role and preferences to begin discovering opportunities.
-            </CardDescription>
+            <CardDescription>Enter your target role and preferences to begin discovering opportunities.</CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={handleSearch} className="space-y-6">
@@ -127,7 +151,7 @@ const Home = () => {
                   type="text"
                   placeholder="e.g., Software Engineer, Product Manager, Sales Director"
                   value={searchParams.role}
-                  onChange={(e) => setSearchParams(prev => ({ ...prev, role: e.target.value }))}
+                  onChange={(e) => setSearchParams((prev) => ({ ...prev, role: e.target.value }))}
                   className="text-base"
                   required
                 />
@@ -144,7 +168,7 @@ const Home = () => {
                     type="text"
                     placeholder="City, State"
                     value={searchParams.location}
-                    onChange={(e) => setSearchParams(prev => ({ ...prev, location: e.target.value }))}
+                    onChange={(e) => setSearchParams((prev) => ({ ...prev, location: e.target.value }))}
                   />
                 </div>
 
@@ -159,24 +183,14 @@ const Home = () => {
                     min="10"
                     max="500"
                     value={searchParams.maxResults}
-                    onChange={(e) => setSearchParams(prev => ({ ...prev, maxResults: e.target.value }))}
+                    onChange={(e) => setSearchParams((prev) => ({ ...prev, maxResults: e.target.value }))}
                   />
                 </div>
               </div>
 
-              <Button 
-                type="submit" 
-                variant="search" 
-                size="lg" 
-                className="w-full"
-                disabled={!searchParams.role.trim() || isLoading}
-              >
-                {isLoading ? (
-                  <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                ) : (
-                  <Search className="w-5 h-5 mr-2" />
-                )}
-                {isLoading ? "Starting Search..." : "Run Job Search"}
+              <Button type="submit" variant="search" size="lg" className="w-full" disabled={!searchParams.role.trim() || isLoading}>
+                {isLoading ? <Loader2 className="w-5 h-5 mr-2 animate-spin" /> : <Search className="w-5 h-5 mr-2" />}
+                {isLoading ? "Running Workflow..." : "Run Job Search"}
               </Button>
             </form>
           </CardContent>
@@ -190,9 +204,7 @@ const Home = () => {
                 <Search className="w-6 h-6 text-primary" />
               </div>
               <h3 className="font-semibold mb-2">Smart Job Discovery</h3>
-              <p className="text-sm text-muted-foreground">
-                Find relevant opportunities from multiple sources with intelligent filtering.
-              </p>
+              <p className="text-sm text-muted-foreground">Find relevant opportunities from multiple sources with intelligent filtering.</p>
             </CardContent>
           </Card>
 
@@ -202,9 +214,7 @@ const Home = () => {
                 <Target className="w-6 h-6 text-accent" />
               </div>
               <h3 className="font-semibold mb-2">Contact Discovery</h3>
-              <p className="text-sm text-muted-foreground">
-                Identify key decision makers and get verified contact information.
-              </p>
+              <p className="text-sm text-muted-foreground">Identify key decision makers and get verified contact information.</p>
             </CardContent>
           </Card>
 
@@ -214,9 +224,7 @@ const Home = () => {
                 <div className="w-6 h-6 text-warning font-bold">AI</div>
               </div>
               <h3 className="font-semibold mb-2">AI Outreach</h3>
-              <p className="text-sm text-muted-foreground">
-                Generate personalized messages tailored to each contact and role.
-              </p>
+              <p className="text-sm text-muted-foreground">Generate personalized messages tailored to each contact and role.</p>
             </CardContent>
           </Card>
         </div>
