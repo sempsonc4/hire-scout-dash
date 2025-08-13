@@ -282,6 +282,8 @@ const Results = () => {
   const setupRealtime = () => {
     if (!supabaseClient.current || !runId) return;
 
+    console.log('Setting up realtime subscriptions for run_id:', runId);
+
     realtimeChannel.current = supabaseClient.current
       .channel('search-results')
       .on(
@@ -294,6 +296,7 @@ const Results = () => {
         },
         (payload) => {
           const newRun = payload.new as RunRow;
+          console.log('Received run update:', newRun);
           setRunData(newRun);
           setRunStatus(
             newRun.status === 'completed' ? 'completed' : 
@@ -311,6 +314,7 @@ const Results = () => {
         },
         (payload) => {
           const newJob = payload.new as JobRow;
+          console.log('Received new job:', newJob);
           setJobs(prev => {
             const exists = prev.some(job => job.id === newJob.job_id);
             if (exists) return prev;
@@ -318,7 +322,26 @@ const Results = () => {
           });
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        console.log('Realtime subscription status:', status);
+        if (status === 'SUBSCRIBED') {
+          console.log('Successfully subscribed to realtime updates');
+        } else if (status === 'CHANNEL_ERROR') {
+          console.error('Realtime subscription error');
+        }
+      });
+
+    // Also poll for updates as a fallback
+    const pollInterval = setInterval(async () => {
+      if (runStatus === 'completed' || runStatus === 'failed') {
+        clearInterval(pollInterval);
+        return;
+      }
+      
+      await fetchLatestJobs();
+    }, 5000); // Poll every 5 seconds
+
+    return () => clearInterval(pollInterval);
   };
 
   // Auto-select first job
@@ -348,6 +371,36 @@ const Results = () => {
       setMessageData({ subject: "", body: "" });
     }
   }, [selectedContact]);
+
+  // Function to fetch latest jobs as fallback
+  const fetchLatestJobs = async () => {
+    if (!supabaseClient.current || !runId) return;
+
+    try {
+      const { data: jobsData, error } = await supabaseClient.current
+        .from('jobs')
+        .select('*')
+        .eq('run_id', runId)
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('Error fetching jobs:', error);
+        return;
+      }
+
+      const newJobs = mapRowsToJobs(jobsData || []);
+      setJobs(prev => {
+        // Only update if we have new jobs
+        if (newJobs.length !== prev.length) {
+          console.log(`Updated jobs: ${prev.length} -> ${newJobs.length}`);
+          return newJobs;
+        }
+        return prev;
+      });
+    } catch (error) {
+      console.error('Error in fetchLatestJobs:', error);
+    }
+  };
 
   const handleCopyMessage = () => {
     const fullMessage = `Subject: ${messageData.subject}\n\n${messageData.body}`;

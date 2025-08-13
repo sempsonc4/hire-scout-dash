@@ -16,6 +16,11 @@ export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_ANON_KEY, 
 // Create a new client with custom JWT for read-only access to specific run
 export const createJWTClient = (jwt: string) => {
   return createClient<Database>(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    realtime: {
+      params: {
+        eventsPerSecond: 10,
+      },
+    },
     global: {
       headers: {
         Authorization: `Bearer ${jwt}`,
