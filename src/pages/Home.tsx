@@ -38,7 +38,7 @@ const Home = () => {
       form.append("params", JSON.stringify(params));
 
       // POST to n8n start endpoint - expect JWT response
-      const res = await fetch("https://n8n.srv930021.hstgr.cloud/webhook/search/start", {
+      const res = await fetch("/webhook/search/start", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: form.toString(),
