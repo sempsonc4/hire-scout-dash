@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useSearchParams, useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -40,11 +40,22 @@ interface Job {
   url?: string;
 }
 
+interface Contact {
+  id: string;
+  name: string;
+  title: string;
+  email?: string;
+  linkedin?: string;
+  phone?: string;
+  verified?: string;
+}
+
 type RunPhase = "loading" | "running" | "completed" | "failed";
 
 // DB Types
 type RunRow = Database["public"]["Tables"]["runs"]["Row"];
 type JobRow = Database["public"]["Tables"]["jobs"]["Row"];
+type ContactRow = Database["public"]["Tables"]["contacts"]["Row"];
 
 type LocationState = {
   jwt?: string;
@@ -52,59 +63,6 @@ type LocationState = {
   searchId?: string;
 };
 
-const mockContacts: Record<
-  string,
-  Array<{
-    id: string;
-    name: string;
-    title: string;
-    email?: string;
-    linkedin?: string;
-    phone?: string;
-    verified: "verified" | "unverified" | "pending";
-  }>
-> = {
-  "1": [
-    {
-      id: "c1",
-      name: "Sarah Johnson",
-      title: "VP of Engineering",
-      email: "sarah.johnson@techcorp.com",
-      linkedin: "https://linkedin.com/in/sarahjohnson",
-      phone: "+1 (555) 123-4567",
-      verified: "verified",
-    },
-    {
-      id: "c2",
-      name: "Mike Chen",
-      title: "Senior Hiring Manager",
-      email: "mike.chen@techcorp.com",
-      linkedin: "https://linkedin.com/in/mikechen",
-      verified: "unverified",
-    },
-  ],
-  "2": [
-    {
-      id: "c3",
-      name: "Jessica Brown",
-      title: "CTO",
-      email: "jessica@startupxyz.com",
-      linkedin: "https://linkedin.com/in/jessicabrown",
-      verified: "verified",
-    },
-  ],
-  "3": [
-    {
-      id: "c4",
-      name: "David Wilson",
-      title: "Director of Engineering",
-      email: "david.wilson@bigtech.com",
-      linkedin: "https://linkedin.com/in/davidwilson",
-      phone: "+1 (555) 987-6543",
-      verified: "pending",
-    },
-  ],
-};
 
 const mockMessages: Record<string, { subject: string; body: string }> = {
   c1: {
@@ -140,11 +98,13 @@ const Results = () => {
   const { toast } = useToast();
 
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [contacts, setContacts] = useState<Contact[]>([]);
   const [selectedJob, setSelectedJob] = useState<string | null>(null);
   const [selectedContact, setSelectedContact] = useState<string | null>(null);
   const [messageData, setMessageData] = useState({ subject: "", body: "" });
   const [runStatus, setRunStatus] = useState<RunPhase>("loading");
   const [runData, setRunData] = useState<RunRow | null>(null);
+  const [contactsLoading, setContactsLoading] = useState(false);
 
   const supabaseRef = useRef<ReturnType<typeof createJWTClient> | null>(null);
   const channelRef = useRef<ReturnType<NonNullable<typeof supabaseRef["current"]>["channel"]> | null>(null);
@@ -399,26 +359,91 @@ const Results = () => {
     }
   }, [jobs, selectedJob]);
 
-  // Mock contacts selection
+  // Fetch contacts when job is selected
   useEffect(() => {
-    if (selectedJob) {
-      const contacts = mockContacts[selectedJob] || [];
-      if (contacts.length > 0 && !selectedContact) {
-        setSelectedContact(contacts[0].id);
-      } else if (contacts.length === 0) {
-        setSelectedContact(null);
-      }
-    }
-  }, [selectedJob, selectedContact]);
+    if (!selectedJob || !supabaseRef.current || !runId || isDemo) return;
 
-  // Load mock message
+    const fetchContacts = async () => {
+      setContactsLoading(true);
+      setContacts([]);
+      setSelectedContact(null);
+
+      try {
+        const selectedJobData = jobs.find(j => j.id === selectedJob);
+        if (!selectedJobData) return;
+
+        // Query by company name to find contacts
+        const { data: companiesData, error: companiesError } = await supabaseRef.current!
+          .from('companies')
+          .select('company_id')
+          .ilike('name', selectedJobData.company);
+
+        if (companiesError) throw companiesError;
+
+        if (companiesData && companiesData.length > 0) {
+          const companyIds = companiesData.map(c => c.company_id);
+          
+          const { data: contactsData, error: contactsError } = await supabaseRef.current!
+            .from('contacts')
+            .select('*')
+            .in('company_id', companyIds);
+
+          if (contactsError) throw contactsError;
+
+          const mappedContacts = (contactsData || []).map((contact: ContactRow) => ({
+            id: contact.contact_id,
+            name: contact.name || 'Unknown',
+            title: contact.title || '',
+            email: contact.email || undefined,
+            linkedin: contact.linkedin || undefined,
+            phone: contact.phone || undefined,
+            verified: contact.email_status || 'unverified'
+          }));
+
+          setContacts(mappedContacts);
+        }
+      } catch (error) {
+        console.error('Error fetching contacts:', error);
+      } finally {
+        setContactsLoading(false);
+      }
+    };
+
+    fetchContacts();
+  }, [selectedJob, jobs, runId, isDemo]);
+
+  // Auto-select first contact
   useEffect(() => {
-    if (selectedContact && mockMessages[selectedContact]) {
-      setMessageData(mockMessages[selectedContact]);
+    if (contacts.length > 0 && !selectedContact) {
+      setSelectedContact(contacts[0].id);
+    } else if (contacts.length === 0) {
+      setSelectedContact(null);
+    }
+  }, [contacts, selectedContact]);
+
+  // Generate placeholder message when contact is selected
+  useEffect(() => {
+    if (selectedContact && contacts.length > 0) {
+      const contact = contacts.find(c => c.id === selectedContact);
+      if (contact) {
+        const selectedJobData = jobs.find(j => j.id === selectedJob);
+        setMessageData({
+          subject: `Exploring opportunities at ${selectedJobData?.company || 'your company'}`,
+          body: `Hi ${contact.name.split(' ')[0]},
+
+I hope this message finds you well. I came across the ${selectedJobData?.title || 'position'} role at ${selectedJobData?.company || 'your company'} and was immediately drawn to your team's work.
+
+With my background and passion for the field, I believe I could contribute significantly to your continued success.
+
+Would you be available for a brief conversation about this opportunity?
+
+Best regards`
+        });
+      }
     } else {
       setMessageData({ subject: "", body: "" });
     }
-  }, [selectedContact]);
+  }, [selectedContact, contacts, selectedJob, jobs]);
 
   const handleCopyMessage = () => {
     const fullMessage = `Subject: ${messageData.subject}\n\n${messageData.body}`;
@@ -467,7 +492,15 @@ const Results = () => {
   const getSourceBadge = (source?: string) =>
     source ? <Badge variant="source">{source}</Badge> : null;
 
-  const currentContacts = selectedJob ? mockContacts[selectedJob] || [] : [];
+  const handleGenerateMessage = async () => {
+    if (!selectedContact || !selectedJob) return;
+    
+    // Placeholder for now - will call webhook later
+    toast({
+      title: "Generate Outreach Message",
+      description: "Message generation feature coming soon!",
+    });
+  };
 
   return (
     <div className="min-h-screen bg-background">
@@ -597,8 +630,12 @@ const Results = () => {
           <Card className="flex flex-col">
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
-                <Users className="w-4 h-4" />
-                Contacts ({(selectedJob && (mockContacts[selectedJob] || []).length) || 0})
+                {contactsLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Users className="w-4 h-4" />
+                )}
+                Contacts ({contacts.length})
               </CardTitle>
             </CardHeader>
             <CardContent className="flex-1 overflow-y-auto space-y-3 p-4">
@@ -607,14 +644,19 @@ const Results = () => {
                   <Users className="w-8 h-8 mx-auto mb-2" />
                   <p className="text-sm">Select a job to view contacts</p>
                 </div>
-              ) : (mockContacts[selectedJob] || []).length === 0 ? (
+              ) : contactsLoading ? (
+                <div className="text-center py-8 text-muted-foreground">
+                  <Loader2 className="w-8 h-8 mx-auto mb-2 animate-spin" />
+                  <p className="text-sm">Fetching contacts for {jobs.find(j => j.id === selectedJob)?.company}...</p>
+                </div>
+              ) : contacts.length === 0 ? (
                 <div className="text-center py-8 text-muted-foreground">
                   <Users className="w-8 h-8 mx-auto mb-2" />
                   <p className="text-sm">No contacts found for this position</p>
                   <p className="text-xs mt-1">Contact discovery in progress...</p>
                 </div>
               ) : (
-                (mockContacts[selectedJob] || []).map((contact) => (
+                contacts.map((contact) => (
                   <Card
                     key={contact.id}
                     className={`cursor-pointer transition-all duration-200 hover:shadow-md ${
@@ -706,6 +748,12 @@ const Results = () => {
                 </div>
               ) : (
                 <div className="space-y-4 flex-1 flex flex-col">
+                  <Button 
+                    onClick={handleGenerateMessage}
+                    className="w-full"
+                  >
+                    Generate Outreach Message
+                  </Button>
                   <div className="space-y-2">
                     <label className="text-xs font-medium text-muted-foreground">
                       Subject
@@ -738,13 +786,7 @@ const Results = () => {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => {
-                        // placeholder — wire to your generator if/when ready
-                        toast({
-                          title: "Message regenerated",
-                          description: "AI has generated a new personalized message.",
-                        });
-                      }}
+                      onClick={handleGenerateMessage}
                       className="flex-1"
                     >
                       <RefreshCw className="w-3 h-3 mr-2" />
