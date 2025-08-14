@@ -708,6 +708,17 @@ Best regards`
                           <div className="flex items-center gap-2 text-xs">
                             <Mail className="w-3 h-3" />
                             <span className="text-muted-foreground">{contact.email}</span>
+                            {contact.verified === "verified" ? (
+                              <div className="flex items-center gap-1 text-emerald-600">
+                                <CheckCircle className="w-3 h-3" />
+                                <span className="text-xs">Verified</span>
+                              </div>
+                            ) : contact.verified === "unverified" ? (
+                              <div className="flex items-center gap-1 text-red-500">
+                                <XCircle className="w-3 h-3" />
+                                <span className="text-xs">Not verified</span>
+                              </div>
+                            ) : null}
                           </div>
                         )}
                         {contact.phone && (
@@ -719,7 +730,15 @@ Best regards`
                         {contact.linkedin && (
                           <div className="flex items-center gap-2 text-xs">
                             <Linkedin className="w-3 h-3" />
-                            <span className="text-muted-foreground">LinkedIn Profile</span>
+                            <a 
+                              href={contact.linkedin} 
+                              target="_blank" 
+                              rel="noopener noreferrer"
+                              className="text-primary hover:underline"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              LinkedIn Profile
+                            </a>
                           </div>
                         )}
                       </div>
