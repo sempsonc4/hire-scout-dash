@@ -531,10 +531,10 @@ Best regards`
 
       {/* Main Content */}
       <div className="container mx-auto p-4">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h=[calc(100vh-8rem)] lg:h-[calc(100vh-8rem)]">
-          {/* Jobs Panel */}
-          <Card className="flex flex-col">
-            <CardHeader className="pb-3">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[calc(100vh-8rem)]">
+          {/* Jobs Panel - Scrollable */}
+          <Card className="flex flex-col h-full">
+            <CardHeader className="pb-3 flex-shrink-0">
               <CardTitle className="text-base flex items-center gap-2">
                 {(runStatus === "running" || runStatus === "loading") ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
@@ -544,7 +544,7 @@ Best regards`
                 Jobs ({jobs.length})
               </CardTitle>
             </CardHeader>
-            <CardContent className="flex-1 overflow-y-auto space-y-3 p-4">
+            <CardContent className="flex-1 overflow-y-auto space-y-3 p-4 min-h-0">
               {runStatus === "loading" || runStatus === "running" ? (
                 <div className="text-center py-8 text-muted-foreground">
                   <Loader2 className="w-8 h-8 mx-auto mb-2 animate-spin" />
