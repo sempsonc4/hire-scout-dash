@@ -154,7 +154,7 @@ const Results = () => {
       
       let baseQuery = supabaseRef.current
         .from('jobs')
-        .select('*, companies!inner(company_id, name)', { count: 'exact' });
+        .select('*, companies!jobs_company_id_fkey(company_id, name)', { count: 'exact' });
 
       // Add run filter for run mode
       if (mode === "run" && runId) {
