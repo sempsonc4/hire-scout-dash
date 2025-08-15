@@ -14,13 +14,14 @@ import JobsList, { Job } from "@/components/JobsList";
 import ContactsList, { Contact } from "@/components/ContactsList";
 import MessagePanel from "@/components/MessagePanel";
 
-// ---- Local view row types (lightweight & resilient to DB drift) ----
+// ---- Local view row types (aligned to v_jobs_read_plus) ----
 type JobReadRow = {
   job_id: string;
   run_id: string | null;
   title: string | null;
-  company_id: string | null;
   company_name: string | null;
+  company_id: string | null;              // may exist in base view; not always populated
+  company_id_resolved: string | null;     // NEW from v_jobs_read_plus (COALESCE of link/alias/name)
   location: string | null;
   salary: string | null;
   posted_at: string | null;
@@ -28,7 +29,7 @@ type JobReadRow = {
   source_type: string | null;
   link: string | null;
   created_at: string | null;
-  contact_count: number | null; // provided by v_jobs_read
+  contact_count: number | null;           // NEW from v_jobs_read_plus
 };
 
 type ContactReadRow = {
@@ -129,7 +130,7 @@ const Results = () => {
     }
   }, [mode, jwt, jwtExp, navigate, toast]);
 
-  // Build query with filters for v_jobs_read
+  // Build query with filters for v_jobs_read_plus
   const buildJobViewQuery = useCallback((base: any) => {
     let q = base;
 
@@ -159,7 +160,7 @@ const Results = () => {
     return q;
   }, [filters]);
 
-  // Fetch jobs from v_jobs_read (paged)
+  // Fetch jobs from v_jobs_read_plus (paged)
   const fetchJobs = useCallback(
     async (page: number = 1) => {
       if (!supabaseRef.current) return;
@@ -168,7 +169,7 @@ const Results = () => {
         const offset = (page - 1) * JOBS_PER_PAGE;
 
         let base = supabaseRef.current
-          .from("v_jobs_read")
+          .from("v_jobs_read_plus")
           .select("*", { count: "exact" });
 
         if (mode === "run" && runId) {
@@ -193,7 +194,8 @@ const Results = () => {
           id: row.job_id,
           title: row.title || "",
           company: row.company_name || "",
-          company_id: row.company_id || undefined,
+          // Use resolved id from the view
+          company_id: row.company_id_resolved || row.company_id || undefined,
           location: row.location || undefined,
           salary: row.salary || undefined,
           posted_at: row.posted_at || undefined,
@@ -224,13 +226,13 @@ const Results = () => {
     [mode, runId, buildJobViewQuery, selectedJobId, toast]
   );
 
-  // Suggestions (companies, sources) from v_jobs_read
+  // Suggestions (companies, sources) from v_jobs_read_plus
   const fetchFilterSuggestions = useCallback(async () => {
     if (!supabaseRef.current) return;
     try {
       const [{ data: compData }, { data: srcData }] = await Promise.all([
-        supabaseRef.current.from("v_jobs_read").select("company_name").not("company_name", "is", null).limit(200),
-        supabaseRef.current.from("v_jobs_read").select("source, source_type").limit(200),
+        supabaseRef.current.from("v_jobs_read_plus").select("company_name").not("company_name", "is", null).limit(200),
+        supabaseRef.current.from("v_jobs_read_plus").select("source, source_type").limit(200),
       ]);
 
       if (compData) {
@@ -283,22 +285,28 @@ const Results = () => {
               newStatus === "failed" ? "failed" : "running";
             setRunStatus(phase);
           }
-        ).on(
+        )
+        .on(
           "postgres_changes",
           { event: "*", schema: "public", table: "jobs", filter: `run_id=eq.${runId}` },
           () => fetchJobs(currentPage)
-        ).on(
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "company_jobs" },
+          () => fetchJobs(currentPage) // links affect company_id_resolved & contact_count
+        )
+        .on(
           "postgres_changes",
           { event: "*", schema: "public", table: "contacts" },
           () => {
-            // contacts/hasContacts might change while on the page
-            fetchJobs(currentPage);
+            fetchJobs(currentPage); // contact_count may change
             if (selectedJobId) {
-              // refresh contacts for the selected job’s company
               loadContactsForSelectedJob(selectedJobId);
             }
           }
-        ).subscribe();
+        )
+        .subscribe();
 
         channelRef.current = ch;
       } catch (err: any) {
@@ -338,7 +346,7 @@ const Results = () => {
     setCurrentPage(1);
   }, [filters]);
 
-  // Load contacts for a given job (from v_contacts_read)
+  // Load contacts for a given job (from v_contacts_read) using company_id_resolved
   const loadContactsForSelectedJob = useCallback(
     async (jobId: string) => {
       if (!supabaseRef.current) return;
@@ -348,13 +356,16 @@ const Results = () => {
 
       try {
         const job = jobs.find(j => j.id === jobId);
-        if (!job?.company_id) return;
+        if (!job?.company_id) {
+          setContactsLoading(false);
+          return;
+        }
 
         const { data, error } = await supabaseRef.current
           .from("v_contacts_read")
           .select("*")
           .eq("company_id", job.company_id)
-          .order("title", { ascending: true }); // lightweight default ordering
+          .order("title", { ascending: true });
 
         if (error) throw error;
 
