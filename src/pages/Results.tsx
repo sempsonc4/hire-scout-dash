@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useSearchParams, useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -7,7 +7,6 @@ import { ArrowLeft, Target, RefreshCw, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { createJWTClient } from "@/lib/supabaseClient";
-import type { Database } from "@/integrations/supabase/types";
 
 // Components
 import JobFilters, { JobFiltersState } from "@/components/JobFilters";
@@ -15,11 +14,34 @@ import JobsList, { Job } from "@/components/JobsList";
 import ContactsList, { Contact } from "@/components/ContactsList";
 import MessagePanel from "@/components/MessagePanel";
 
-// DB Types
-type RunRow = Database["public"]["Tables"]["runs"]["Row"];
-type JobRow = Database["public"]["Tables"]["jobs"]["Row"];
-type ContactRow = Database["public"]["Tables"]["contacts"]["Row"];
-type CompanyRow = Database["public"]["Tables"]["companies"]["Row"];
+// ---- Local view row types (lightweight & resilient to DB drift) ----
+type JobReadRow = {
+  job_id: string;
+  run_id: string | null;
+  title: string | null;
+  company_id: string | null;
+  company_name: string | null;
+  location: string | null;
+  salary: string | null;
+  posted_at: string | null;
+  source: string | null;
+  source_type: string | null;
+  link: string | null;
+  created_at: string | null;
+  contact_count: number | null; // provided by v_jobs_read
+};
+
+type ContactReadRow = {
+  contact_id: string;
+  company_id: string | null;
+  name: string | null;
+  title: string | null;
+  email: string | null;
+  email_status: string | null;
+  linkedin: string | null;
+  phone: string | null;
+  created_at: string | null;
+};
 
 type RunPhase = "loading" | "running" | "completed" | "failed";
 
@@ -39,9 +61,11 @@ const Results = () => {
 
   // Mode detection
   const runId = searchParams.get("run_id");
-  const mode = runId ? "run" : "browse";
+  const mode: "run" | "browse" = runId ? "run" : "browse";
+
+  // Optional display hints from URL
   const role = searchParams.get("role") || "";
-  const company = searchParams.get("company") || "";
+  const companyQuery = searchParams.get("company") || "";
   const locationParam = searchParams.get("location") || "";
 
   // State
@@ -51,11 +75,10 @@ const Results = () => {
   const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
   const [runStatus, setRunStatus] = useState<RunPhase>("loading");
   const [isJobsLoading, setIsJobsLoading] = useState(false);
-  const [runData, setRunData] = useState<RunRow | null>(null);
   const [contactsLoading, setContactsLoading] = useState(false);
   const [isGeneratingMessage, setIsGeneratingMessage] = useState(false);
 
-  // Pagination and filtering
+  // Pagination & filters
   const [currentPage, setCurrentPage] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
   const [filters, setFilters] = useState<JobFiltersState>({
@@ -68,25 +91,26 @@ const Results = () => {
     hasContacts: false,
   });
 
-  // Data for filter suggestions
+  // Suggestions for filters
   const [companySuggestions, setCompanySuggestions] = useState<string[]>([]);
   const [sourceSuggestions, setSourceSuggestions] = useState<string[]>([]);
 
-  const supabaseRef = useRef<ReturnType<typeof createJWTClient> | null>(null);
+  // Supabase client (JWT in run mode, anon otherwise)
+  const supabaseRef = useRef<ReturnType<typeof createJWTClient> | typeof supabase | null>(null);
   const channelRef = useRef<ReturnType<NonNullable<typeof supabaseRef["current"]>["channel"]> | null>(null);
 
+  // JWT from navigation state (run mode)
   const state = location.state as LocationState | null;
   const jwt = state?.jwt;
   const jwtExp = state?.exp;
 
-  // Get selected job and contact objects
-  const selectedJob = jobs.find(job => job.id === selectedJobId) || null;
-  const selectedContact = contacts.find(contact => contact.id === selectedContactId) || null;
+  // Selected job/contact objects
+  const selectedJob = jobs.find(j => j.id === selectedJobId) || null;
+  const selectedContact = contacts.find(c => c.id === selectedContactId) || null;
 
   // Initialize Supabase client
   useEffect(() => {
     if (mode === "run" && jwt) {
-      // JWT mode for run results
       if (jwtExp && Date.now() / 1000 > jwtExp) {
         toast({
           title: "Session expired",
@@ -96,221 +120,189 @@ const Results = () => {
         navigate("/");
         return;
       }
-
       const client = createJWTClient(jwt);
       supabaseRef.current = client;
-      
-      client.auth.setSession({
-        access_token: jwt,
-        refresh_token: "",
-      });
+      client.auth.setSession({ access_token: jwt, refresh_token: "" });
       client.realtime.setAuth(jwt);
     } else {
-      // Regular mode for browse
       supabaseRef.current = supabase;
     }
   }, [mode, jwt, jwtExp, navigate, toast]);
 
-  // Build query filters
-  const buildQuery = useCallback((baseQuery: any) => {
-    let query = baseQuery;
+  // Build query with filters for v_jobs_read
+  const buildJobViewQuery = useCallback((base: any) => {
+    let q = base;
 
     if (filters.search) {
-      query = query.or(`title.ilike.%${filters.search}%,company_name.ilike.%${filters.search}%`);
+      // search in title + company_name
+      q = q.or(`title.ilike.%${filters.search}%,company_name.ilike.%${filters.search}%`);
     }
-
     if (filters.company) {
-      query = query.ilike('company_name', `%${filters.company}%`);
+      q = q.ilike("company_name", `%${filters.company}%`);
     }
-
     if (filters.dateFrom) {
-      query = query.gte('posted_at', filters.dateFrom);
+      q = q.gte("posted_at", filters.dateFrom);
     }
-
     if (filters.dateTo) {
-      query = query.lte('posted_at', filters.dateTo);
+      q = q.lte("posted_at", filters.dateTo);
     }
-
     if (filters.location) {
-      query = query.ilike('location', `%${filters.location}%`);
+      q = q.ilike("location", `%${filters.location}%`);
     }
-
     if (filters.source) {
-      query = query.or(`source.ilike.%${filters.source}%,source_type.ilike.%${filters.source}%`);
+      q = q.or(`source.ilike.%${filters.source}%,source_type.ilike.%${filters.source}%`);
     }
-
     if (filters.hasContacts) {
-      query = query.not('company_id', 'is', null);
+      q = q.gt("contact_count", 0);
     }
 
-    return query;
+    return q;
   }, [filters]);
 
-  // Fetch jobs with pagination and filtering
-  const fetchJobs = useCallback(async (page: number = 1) => {
-    if (!supabaseRef.current) return;
+  // Fetch jobs from v_jobs_read (paged)
+  const fetchJobs = useCallback(
+    async (page: number = 1) => {
+      if (!supabaseRef.current) return;
+      setIsJobsLoading(true);
+      try {
+        const offset = (page - 1) * JOBS_PER_PAGE;
 
-    setIsJobsLoading(true);
-    try {
-      const offset = (page - 1) * JOBS_PER_PAGE;
-      
-      let baseQuery = supabaseRef.current
-        .from('jobs')
-        .select('*, companies!jobs_company_id_fkey(company_id, name)', { count: 'exact' });
+        let base = supabaseRef.current
+          .from("v_jobs_read")
+          .select("*", { count: "exact" });
 
-      // Add run filter for run mode
-      if (mode === "run" && runId) {
-        baseQuery = baseQuery.eq('run_id', runId);
+        if (mode === "run" && runId) {
+          base = base.eq("run_id", runId);
+        }
+
+        const query = buildJobViewQuery(base)
+          // Prefer newest by posted_at, fallback to created_at
+          .order("posted_at", { ascending: false, nullsFirst: false })
+          .order("created_at", { ascending: false })
+          .range(offset, offset + JOBS_PER_PAGE - 1);
+
+        const { data, error, count } = await query as {
+          data: JobReadRow[] | null;
+          error: any;
+          count: number | null;
+        };
+
+        if (error) throw error;
+
+        const mapped: Job[] = (data || []).map((row) => ({
+          id: row.job_id,
+          title: row.title || "",
+          company: row.company_name || "",
+          company_id: row.company_id || undefined,
+          location: row.location || undefined,
+          salary: row.salary || undefined,
+          posted_at: row.posted_at || undefined,
+          source: row.source || undefined,
+          source_type: row.source_type || undefined,
+          link: row.link || undefined,
+          hasContacts: (row.contact_count || 0) > 0,
+        }));
+
+        setJobs(mapped);
+        setTotalCount(count || 0);
+
+        // Auto-select the first job when none selected
+        if (mapped.length > 0 && !selectedJobId) {
+          setSelectedJobId(mapped[0].id);
+        }
+      } catch (err) {
+        console.error("Error fetching jobs:", err);
+        toast({
+          title: "Error loading jobs",
+          description: "Failed to load job listings. Please try again.",
+          variant: "destructive",
+        });
+      } finally {
+        setIsJobsLoading(false);
       }
+    },
+    [mode, runId, buildJobViewQuery, selectedJobId, toast]
+  );
 
-      // Apply filters
-      const query = buildQuery(baseQuery)
-        .order('created_at', { ascending: false })
-        .range(offset, offset + JOBS_PER_PAGE - 1);
-
-      const { data, error, count } = await query;
-
-      if (error) throw error;
-
-      // Map to Job format and check for contacts
-      const mappedJobs: Job[] = await Promise.all(
-        (data || []).map(async (row: any) => {
-          let hasContacts = false;
-          
-          if (row.company_id) {
-            const { count: contactCount } = await supabaseRef.current!
-              .from('contacts')
-              .select('*', { count: 'exact', head: true })
-              .eq('company_id', row.company_id);
-            
-            hasContacts = (contactCount || 0) > 0;
-          }
-
-          return {
-            id: row.job_id,
-            title: row.title || "",
-            company: row.company_name || "",
-            company_id: row.company_id,
-            location: row.location || undefined,
-            salary: row.salary || undefined,
-            posted_at: row.posted_at || undefined,
-            source: row.source || undefined,
-            source_type: row.source_type || undefined,
-            link: row.link || undefined,
-            hasContacts
-          };
-        })
-      );
-
-      setJobs(mappedJobs);
-      setTotalCount(count || 0);
-
-      // Auto-select first job
-      if (mappedJobs.length > 0 && !selectedJobId) {
-        setSelectedJobId(mappedJobs[0].id);
-      }
-
-    } catch (error) {
-      console.error('Error fetching jobs:', error);
-      toast({
-        title: "Error loading jobs",
-        description: "Failed to load job listings. Please try again.",
-        variant: "destructive",
-      });
-    } finally {
-      setIsJobsLoading(false);
-    }
-  }, [mode, runId, buildQuery, selectedJobId, toast, supabaseRef]);
-
-  // Fetch filter suggestions
+  // Suggestions (companies, sources) from v_jobs_read
   const fetchFilterSuggestions = useCallback(async () => {
     if (!supabaseRef.current) return;
-
     try {
-      const [companiesRes, sourcesRes] = await Promise.all([
-        supabaseRef.current
-          .from('jobs')
-          .select('company_name')
-          .not('company_name', 'is', null)
-          .limit(100),
-        supabaseRef.current
-          .from('jobs')
-          .select('source, source_type')
-          .limit(100)
+      const [{ data: compData }, { data: srcData }] = await Promise.all([
+        supabaseRef.current.from("v_jobs_read").select("company_name").not("company_name", "is", null).limit(200),
+        supabaseRef.current.from("v_jobs_read").select("source, source_type").limit(200),
       ]);
 
-      if (companiesRes.data) {
-        const uniqueCompanies = [...new Set(
-          companiesRes.data.map(row => row.company_name).filter(Boolean)
-        )].sort();
-        setCompanySuggestions(uniqueCompanies);
+      if (compData) {
+        const uniq = [...new Set(compData.map(r => r.company_name).filter(Boolean) as string[])].sort();
+        setCompanySuggestions(uniq);
       }
-
-      if (sourcesRes.data) {
-        const allSources = sourcesRes.data.flatMap(row => 
-          [row.source, row.source_type].filter(Boolean)
-        );
-        const uniqueSources = [...new Set(allSources)].sort();
-        setSourceSuggestions(uniqueSources);
+      if (srcData) {
+        const all = (srcData as { source: string | null; source_type: string | null }[])
+          .flatMap(r => [r.source, r.source_type].filter(Boolean) as string[]);
+        const uniq = [...new Set(all)].sort();
+        setSourceSuggestions(uniq);
       }
-    } catch (error) {
-      console.error('Error fetching filter suggestions:', error);
+    } catch (err) {
+      console.error("Error fetching filter suggestions:", err);
     }
   }, []);
 
-  // Setup realtime subscriptions for run mode
+  // Realtime: listen to base tables; refetch page on changes during a run
   useEffect(() => {
     if (mode !== "run" || !runId || !supabaseRef.current) return;
 
     let cancelled = false;
 
-    const setupRealtime = async () => {
+    const setup = async () => {
       try {
-        // Initial run data fetch
-        const { data: runRow, error: runErr } = await supabaseRef.current!
+        // Fetch initial run row to derive status badge
+        const { data: runRow, error } = await supabaseRef.current
           .from("runs")
           .select("*")
           .eq("run_id", runId)
           .single();
 
         if (cancelled) return;
-        if (runErr) throw runErr;
+        if (error) throw error;
 
-        setRunData(runRow);
         const phase: RunPhase =
-          runRow.status === "completed" ? "completed" : 
+          runRow.status === "completed" ? "completed" :
           runRow.status === "failed" ? "failed" : "running";
         setRunStatus(phase);
 
-        // Setup realtime channel
-        const channel = supabaseRef.current!.channel(`search-results-${runId}`);
+        const ch = supabaseRef.current.channel(`results-${runId}`);
 
-        channel
-          .on(
-            "postgres_changes",
-            { event: "UPDATE", schema: "public", table: "runs", filter: `run_id=eq.${runId}` },
-            (payload) => {
-              const newRun = payload.new as RunRow;
-              setRunData(newRun);
-              const nextPhase: RunPhase =
-                newRun.status === "completed" ? "completed" : 
-                newRun.status === "failed" ? "failed" : "running";
-              setRunStatus(nextPhase);
+        ch.on(
+          "postgres_changes",
+          { event: "UPDATE", schema: "public", table: "runs", filter: `run_id=eq.${runId}` },
+          payload => {
+            const newStatus = (payload.new as any).status as string;
+            const phase: RunPhase =
+              newStatus === "completed" ? "completed" :
+              newStatus === "failed" ? "failed" : "running";
+            setRunStatus(phase);
+          }
+        ).on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "jobs", filter: `run_id=eq.${runId}` },
+          () => fetchJobs(currentPage)
+        ).on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "contacts" },
+          () => {
+            // contacts/hasContacts might change while on the page
+            fetchJobs(currentPage);
+            if (selectedJobId) {
+              // refresh contacts for the selected job’s company
+              loadContactsForSelectedJob(selectedJobId);
             }
-          )
-          .on(
-            "postgres_changes",
-            { event: "*", schema: "public", table: "jobs", filter: `run_id=eq.${runId}` },
-            () => {
-              // Refetch jobs when new ones arrive
-              fetchJobs(currentPage);
-            }
-          )
-          .subscribe();
+          }
+        ).subscribe();
 
-        channelRef.current = channel;
+        channelRef.current = ch;
       } catch (err: any) {
-        console.error("Error setting up realtime:", err);
+        console.error("Realtime setup failed:", err);
         toast({
           title: "Error loading results",
           description: err.message || "Failed to load search results.",
@@ -320,7 +312,7 @@ const Results = () => {
       }
     };
 
-    setupRealtime();
+    setup();
 
     return () => {
       cancelled = true;
@@ -329,68 +321,57 @@ const Results = () => {
         channelRef.current = null;
       }
     };
-  }, [mode, runId, fetchJobs, currentPage, toast]);
+  }, [mode, runId, currentPage, fetchJobs, selectedJobId, toast]);
 
-  // Fetch jobs when page or filters change
+  // Fetch jobs on mount / page / filters changes
   useEffect(() => {
-    if (supabaseRef.current) {
-      fetchJobs(currentPage);
-    }
+    if (supabaseRef.current) fetchJobs(currentPage);
   }, [fetchJobs, currentPage]);
 
-  // Fetch filter suggestions on mount
+  // Suggestions once
   useEffect(() => {
     fetchFilterSuggestions();
   }, [fetchFilterSuggestions]);
 
-  // Reset page when filters change
+  // Reset paging when filters change
   useEffect(() => {
     setCurrentPage(1);
   }, [filters]);
 
-  // Fetch contacts when job is selected
-  useEffect(() => {
-    if (!selectedJobId || !supabaseRef.current) return;
-
-    const fetchContacts = async () => {
+  // Load contacts for a given job (from v_contacts_read)
+  const loadContactsForSelectedJob = useCallback(
+    async (jobId: string) => {
+      if (!supabaseRef.current) return;
       setContactsLoading(true);
       setContacts([]);
       setSelectedContactId(null);
 
       try {
-        const job = jobs.find(j => j.id === selectedJobId);
-        if (!job?.company_id) {
-          console.log('No company_id found for job:', job);
-          return;
-        }
+        const job = jobs.find(j => j.id === jobId);
+        if (!job?.company_id) return;
 
-        console.log('Fetching contacts for company_id:', job.company_id);
-        const { data: contactsData, error } = await supabaseRef.current!
-          .from('contacts')
-          .select('*')
-          .eq('company_id', job.company_id);
+        const { data, error } = await supabaseRef.current
+          .from("v_contacts_read")
+          .select("*")
+          .eq("company_id", job.company_id)
+          .order("title", { ascending: true }); // lightweight default ordering
 
         if (error) throw error;
 
-        console.log('Contacts data received:', contactsData);
-        const mappedContacts: Contact[] = (contactsData || []).map((contact: ContactRow) => ({
-          id: contact.contact_id,
-          name: contact.name || 'Unknown',
-          title: contact.title || undefined,
-          email: contact.email || undefined,
-          linkedin: contact.linkedin || undefined,
-          phone: contact.phone || undefined,
-          email_status: contact.email_status || undefined
+        const mapped: Contact[] = (data as ContactReadRow[] || []).map((r) => ({
+          id: r.contact_id,
+          name: r.name || "Unknown",
+          title: r.title || undefined,
+          email: r.email || undefined,
+          linkedin: r.linkedin || undefined,
+          phone: r.phone || undefined,
+          email_status: r.email_status || undefined,
         }));
 
-        setContacts(mappedContacts);
-
-        // Auto-select first contact
-        if (mappedContacts.length > 0) {
-          setSelectedContactId(mappedContacts[0].id);
-        }
-      } catch (error) {
-        console.error('Error fetching contacts:', error);
+        setContacts(mapped);
+        if (mapped.length > 0) setSelectedContactId(mapped[0].id);
+      } catch (err) {
+        console.error("Error loading contacts:", err);
         toast({
           title: "Error loading contacts",
           description: "Failed to load contact information.",
@@ -399,42 +380,31 @@ const Results = () => {
       } finally {
         setContactsLoading(false);
       }
-    };
+    },
+    [jobs, toast]
+  );
 
-    fetchContacts();
-  }, [selectedJobId, jobs, toast, supabaseRef]);
+  // React to job selection
+  useEffect(() => {
+    if (selectedJobId) loadContactsForSelectedJob(selectedJobId);
+  }, [selectedJobId, loadContactsForSelectedJob]);
 
-  // Handle page changes
-  const handlePageChange = (page: number) => {
-    setCurrentPage(page);
-  };
+  // Handlers
+  const handlePageChange = (page: number) => setCurrentPage(page);
+  const handleFiltersChange = (f: JobFiltersState) => setFilters(f);
+  const handleJobSelect = (jobId: string) => setSelectedJobId(jobId);
+  const handleContactSelect = (contactId: string) => setSelectedContactId(contactId);
 
-  // Handle filter changes
-  const handleFiltersChange = (newFilters: JobFiltersState) => {
-    setFilters(newFilters);
-  };
-
-  // Handle job selection
-  const handleJobSelect = (jobId: string) => {
-    setSelectedJobId(jobId);
-  };
-
-  // Handle contact selection
-  const handleContactSelect = (contactId: string) => {
-    setSelectedContactId(contactId);
-  };
-
-  // Handle AI message generation (placeholder)
-  const handleGenerateMessage = async (contactId: string, jobId: string) => {
+  // Placeholder message generator
+  const handleGenerateMessage = async (_contactId: string, _jobId: string) => {
     setIsGeneratingMessage(true);
     try {
-      // Placeholder - will implement webhook call later
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      await new Promise((r) => setTimeout(r, 1200));
       toast({
         title: "Message generated",
         description: "AI message has been generated successfully.",
       });
-    } catch (error) {
+    } catch {
       toast({
         title: "Generation failed",
         description: "Failed to generate AI message.",
@@ -445,14 +415,11 @@ const Results = () => {
     }
   };
 
-  const totalPages = Math.ceil(totalCount / JOBS_PER_PAGE);
-
-  // Header content based on mode
-  const getHeaderContent = () => {
+  // Header content
+  const header = (() => {
     if (mode === "run") {
-      const searchType = role ? "Role Search" : company ? "Company Search" : "Search";
-      const searchQuery = role || company || "";
-      
+      const searchType = role ? "Role Search" : companyQuery ? "Company Search" : "Search";
+      const searchQuery = role || companyQuery || "";
       return (
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 bg-gradient-primary rounded-lg flex items-center justify-center">
@@ -470,33 +437,28 @@ const Results = () => {
               {runStatus.charAt(0).toUpperCase() + runStatus.slice(1)}
             </Badge>
             {runStatus === "running" && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => fetchJobs(currentPage)}
-              >
+              <Button variant="outline" size="sm" onClick={() => fetchJobs(currentPage)}>
                 <RefreshCw className="w-4 h-4" />
               </Button>
             )}
           </div>
         </div>
       );
-    } else {
-      return (
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-gradient-primary rounded-lg flex items-center justify-center">
-            <Target className="w-5 h-5 text-primary-foreground" />
-          </div>
-          <div>
-            <h1 className="text-xl font-semibold text-foreground">Browse All Jobs</h1>
-            <p className="text-sm text-muted-foreground">
-              Explore all available positions with advanced filtering
-            </p>
-          </div>
-        </div>
-      );
     }
-  };
+    return (
+      <div className="flex items-center gap-3">
+        <div className="w-8 h-8 bg-gradient-primary rounded-lg flex items-center justify-center">
+          <Target className="w-5 h-5 text-primary-foreground" />
+        </div>
+        <div>
+          <h1 className="text-xl font-semibold text-foreground">Browse All Jobs</h1>
+          <p className="text-sm text-muted-foreground">Explore all available positions with advanced filtering</p>
+        </div>
+      </div>
+    );
+  })();
+
+  const totalPages = Math.ceil(totalCount / JOBS_PER_PAGE);
 
   return (
     <div className="min-h-screen bg-gradient-surface">
@@ -504,20 +466,16 @@ const Results = () => {
       <header className="border-b bg-card/50 backdrop-blur-sm">
         <div className="container mx-auto px-4 py-4">
           <div className="flex items-center justify-between">
-            <Button
-              variant="ghost"
-              onClick={() => navigate("/")}
-              className="mr-4"
-            >
+            <Button variant="ghost" onClick={() => navigate("/")} className="mr-4">
               <ArrowLeft className="w-4 h-4 mr-2" />
               Back to Search
             </Button>
-            {getHeaderContent()}
+            {header}
           </div>
         </div>
       </header>
 
-      {/* Main Content */}
+      {/* Main */}
       <main className="container mx-auto px-4 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-[calc(100vh-12rem)]">
           {/* Jobs Column */}
@@ -561,7 +519,7 @@ const Results = () => {
             />
           </div>
 
-          {/* Messages Column */}
+          {/* Message Column */}
           <div className="lg:col-span-4">
             <MessagePanel
               selectedContact={selectedContact}
