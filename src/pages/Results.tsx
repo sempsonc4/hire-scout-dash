@@ -359,8 +359,12 @@ const Results = () => {
 
       try {
         const job = jobs.find(j => j.id === selectedJobId);
-        if (!job?.company_id) return;
+        if (!job?.company_id) {
+          console.log('No company_id found for job:', job);
+          return;
+        }
 
+        console.log('Fetching contacts for company_id:', job.company_id);
         const { data: contactsData, error } = await supabaseRef.current!
           .from('contacts')
           .select('*')
@@ -368,6 +372,7 @@ const Results = () => {
 
         if (error) throw error;
 
+        console.log('Contacts data received:', contactsData);
         const mappedContacts: Contact[] = (contactsData || []).map((contact: ContactRow) => ({
           id: contact.contact_id,
           name: contact.name || 'Unknown',
@@ -397,7 +402,7 @@ const Results = () => {
     };
 
     fetchContacts();
-  }, [selectedJobId, jobs, toast]);
+  }, [selectedJobId, jobs, toast, supabaseRef]);
 
   // Handle page changes
   const handlePageChange = (page: number) => {
