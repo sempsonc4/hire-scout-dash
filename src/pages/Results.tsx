@@ -1,61 +1,27 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useSearchParams, useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Textarea } from "@/components/ui/textarea";
-import { Input } from "@/components/ui/input";
-import { Separator } from "@/components/ui/separator";
-import {
-  ArrowLeft,
-  Building2,
-  MapPin,
-  Calendar,
-  DollarSign,
-  Users,
-  Mail,
-  Phone,
-  Linkedin,
-  Copy,
-  RefreshCw,
-  CheckCircle,
-  AlertCircle,
-  XCircle,
-  Loader2,
-  ExternalLink,
-} from "lucide-react";
+import { ArrowLeft, Target, RefreshCw, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { supabase } from "@/integrations/supabase/client";
 import { createJWTClient } from "@/lib/supabaseClient";
 import type { Database } from "@/integrations/supabase/types";
 
-// UI Types
-interface Job {
-  id: string;
-  title: string;
-  company: string;
-  location: string;
-  salary?: string;
-  datePosted?: string;
-  source?: string;
-  url?: string;
-}
-
-interface Contact {
-  id: string;
-  name: string;
-  title: string;
-  email?: string;
-  linkedin?: string;
-  phone?: string;
-  verified?: string;
-}
-
-type RunPhase = "loading" | "running" | "completed" | "failed";
+// Components
+import JobFilters, { JobFiltersState } from "@/components/JobFilters";
+import JobsList, { Job } from "@/components/JobsList";
+import ContactsList, { Contact } from "@/components/ContactsList";
+import MessagePanel from "@/components/MessagePanel";
 
 // DB Types
 type RunRow = Database["public"]["Tables"]["runs"]["Row"];
 type JobRow = Database["public"]["Tables"]["jobs"]["Row"];
 type ContactRow = Database["public"]["Tables"]["contacts"]["Row"];
+type CompanyRow = Database["public"]["Tables"]["companies"]["Row"];
+
+type RunPhase = "loading" | "running" | "completed" | "failed";
 
 type LocationState = {
   jwt?: string;
@@ -63,33 +29,7 @@ type LocationState = {
   searchId?: string;
 };
 
-
-const mockMessages: Record<string, { subject: string; body: string }> = {
-  c1: {
-    subject: "Exploring Senior Software Engineer Opportunity at TechCorp",
-    body: `Hi Sarah,
-
-I hope this message finds you well. I came across the Senior Software Engineer position at TechCorp and was immediately drawn to your innovative approach to software development.
-
-With my 5+ years of experience in full-stack development and passion for scalable solutions, I believe I could contribute significantly to your team's continued success.
-
-Would you be available for a brief conversation about this opportunity?
-
-Best regards`,
-  },
-  c2: {
-    subject: "Senior Software Engineer Role - Let's Connect",
-    body: `Hello Mike,
-
-I'm reaching out regarding the Senior Software Engineer position at TechCorp. Your team's reputation for technical excellence aligns perfectly with my career aspirations.
-
-I'd love to discuss how my background in modern web technologies could benefit your engineering initiatives.
-
-Looking forward to connecting!
-
-Best`,
-  },
-};
+const JOBS_PER_PAGE = 20;
 
 const Results = () => {
   const [searchParams] = useSearchParams();
@@ -97,148 +37,249 @@ const Results = () => {
   const location = useLocation();
   const { toast } = useToast();
 
+  // Mode detection
+  const runId = searchParams.get("run_id");
+  const mode = runId ? "run" : "browse";
+  const role = searchParams.get("role") || "";
+  const company = searchParams.get("company") || "";
+  const locationParam = searchParams.get("location") || "";
+
+  // State
   const [jobs, setJobs] = useState<Job[]>([]);
   const [contacts, setContacts] = useState<Contact[]>([]);
-  const [selectedJob, setSelectedJob] = useState<string | null>(null);
-  const [selectedContact, setSelectedContact] = useState<string | null>(null);
-  const [messageData, setMessageData] = useState({ subject: "", body: "" });
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
   const [runStatus, setRunStatus] = useState<RunPhase>("loading");
   const [runData, setRunData] = useState<RunRow | null>(null);
   const [contactsLoading, setContactsLoading] = useState(false);
+  const [isGeneratingMessage, setIsGeneratingMessage] = useState(false);
+
+  // Pagination and filtering
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+  const [filters, setFilters] = useState<JobFiltersState>({
+    search: "",
+    company: "",
+    dateFrom: "",
+    dateTo: "",
+    location: "",
+    source: "",
+    hasContacts: false,
+  });
+
+  // Data for filter suggestions
+  const [companySuggestions, setCompanySuggestions] = useState<string[]>([]);
+  const [sourceSuggestions, setSourceSuggestions] = useState<string[]>([]);
 
   const supabaseRef = useRef<ReturnType<typeof createJWTClient> | null>(null);
   const channelRef = useRef<ReturnType<NonNullable<typeof supabaseRef["current"]>["channel"]> | null>(null);
-  const pollTimerRef = useRef<number | null>(null);
-  const statusRef = useRef<RunPhase>("loading"); // keeps latest status for logs
-
-  const runId = searchParams.get("run_id") || "";
-  const role = searchParams.get("role") || "";
-  const loc = searchParams.get("location") || "";
-  const isDemo = searchParams.get("demo") === "true";
 
   const state = location.state as LocationState | null;
   const jwt = state?.jwt;
   const jwtExp = state?.exp;
 
-  // Helpers
-  const mapRowsToJobs = useCallback((rows: JobRow[]): Job[] => {
-    return rows.map((r) => ({
-      id: r.job_id,
-      title: r.title ?? "",
-      company: r.company_name ?? "",
-      location: r.location ?? "",
-      salary: r.salary ?? undefined,
-      datePosted: r.posted_at ?? undefined,
-      source: r.source_type ?? r.source ?? undefined,
-      url: r.link ?? undefined,
-    }));
+  // Get selected job and contact objects
+  const selectedJob = jobs.find(job => job.id === selectedJobId) || null;
+  const selectedContact = contacts.find(contact => contact.id === selectedContactId) || null;
+
+  // Initialize Supabase client
+  useEffect(() => {
+    if (mode === "run" && jwt) {
+      // JWT mode for run results
+      if (jwtExp && Date.now() / 1000 > jwtExp) {
+        toast({
+          title: "Session expired",
+          description: "Please start a new search to view results.",
+          variant: "destructive",
+        });
+        navigate("/");
+        return;
+      }
+
+      const client = createJWTClient(jwt);
+      supabaseRef.current = client;
+      
+      client.auth.setSession({
+        access_token: jwt,
+        refresh_token: "",
+      });
+      client.realtime.setAuth(jwt);
+    } else {
+      // Regular mode for browse
+      supabaseRef.current = supabase;
+    }
+  }, [mode, jwt, jwtExp, navigate, toast]);
+
+  // Build query filters
+  const buildQuery = useCallback((baseQuery: any) => {
+    let query = baseQuery;
+
+    if (filters.search) {
+      query = query.or(`title.ilike.%${filters.search}%,company_name.ilike.%${filters.search}%`);
+    }
+
+    if (filters.company) {
+      query = query.ilike('company_name', `%${filters.company}%`);
+    }
+
+    if (filters.dateFrom) {
+      query = query.gte('posted_at', filters.dateFrom);
+    }
+
+    if (filters.dateTo) {
+      query = query.lte('posted_at', filters.dateTo);
+    }
+
+    if (filters.location) {
+      query = query.ilike('location', `%${filters.location}%`);
+    }
+
+    if (filters.source) {
+      query = query.or(`source.ilike.%${filters.source}%,source_type.ilike.%${filters.source}%`);
+    }
+
+    if (filters.hasContacts) {
+      query = query.not('company_id', 'is', null);
+    }
+
+    return query;
+  }, [filters]);
+
+  // Fetch jobs with pagination and filtering
+  const fetchJobs = useCallback(async (page: number = 1) => {
+    if (!supabaseRef.current) return;
+
+    try {
+      const offset = (page - 1) * JOBS_PER_PAGE;
+      
+      let baseQuery = supabaseRef.current
+        .from('jobs')
+        .select('*, companies!inner(company_id, name)', { count: 'exact' });
+
+      // Add run filter for run mode
+      if (mode === "run" && runId) {
+        baseQuery = baseQuery.eq('run_id', runId);
+      }
+
+      // Apply filters
+      const query = buildQuery(baseQuery)
+        .order('created_at', { ascending: false })
+        .range(offset, offset + JOBS_PER_PAGE - 1);
+
+      const { data, error, count } = await query;
+
+      if (error) throw error;
+
+      // Map to Job format and check for contacts
+      const mappedJobs: Job[] = await Promise.all(
+        (data || []).map(async (row: any) => {
+          let hasContacts = false;
+          
+          if (row.company_id) {
+            const { count: contactCount } = await supabaseRef.current!
+              .from('contacts')
+              .select('*', { count: 'exact', head: true })
+              .eq('company_id', row.company_id);
+            
+            hasContacts = (contactCount || 0) > 0;
+          }
+
+          return {
+            id: row.job_id,
+            title: row.title || "",
+            company: row.company_name || "",
+            company_id: row.company_id,
+            location: row.location || undefined,
+            salary: row.salary || undefined,
+            posted_at: row.posted_at || undefined,
+            source: row.source || undefined,
+            source_type: row.source_type || undefined,
+            link: row.link || undefined,
+            hasContacts
+          };
+        })
+      );
+
+      setJobs(mappedJobs);
+      setTotalCount(count || 0);
+
+      // Auto-select first job
+      if (mappedJobs.length > 0 && !selectedJobId) {
+        setSelectedJobId(mappedJobs[0].id);
+      }
+
+    } catch (error) {
+      console.error('Error fetching jobs:', error);
+      toast({
+        title: "Error loading jobs",
+        description: "Failed to load job listings. Please try again.",
+        variant: "destructive",
+      });
+    }
+  }, [mode, runId, buildQuery, selectedJobId, toast]);
+
+  // Fetch filter suggestions
+  const fetchFilterSuggestions = useCallback(async () => {
+    if (!supabaseRef.current) return;
+
+    try {
+      const [companiesRes, sourcesRes] = await Promise.all([
+        supabaseRef.current
+          .from('jobs')
+          .select('company_name')
+          .not('company_name', 'is', null)
+          .limit(100),
+        supabaseRef.current
+          .from('jobs')
+          .select('source, source_type')
+          .limit(100)
+      ]);
+
+      if (companiesRes.data) {
+        const uniqueCompanies = [...new Set(
+          companiesRes.data.map(row => row.company_name).filter(Boolean)
+        )].sort();
+        setCompanySuggestions(uniqueCompanies);
+      }
+
+      if (sourcesRes.data) {
+        const allSources = sourcesRes.data.flatMap(row => 
+          [row.source, row.source_type].filter(Boolean)
+        );
+        const uniqueSources = [...new Set(allSources)].sort();
+        setSourceSuggestions(uniqueSources);
+      }
+    } catch (error) {
+      console.error('Error fetching filter suggestions:', error);
+    }
   }, []);
 
-  const upsertJobsInState = useCallback((incoming: JobRow[] | JobRow) => {
-    const list = Array.isArray(incoming) ? incoming : [incoming];
-    setJobs((prev) => {
-      const byId = new Map(prev.map((j) => [j.id, j]));
-      for (const row of list) {
-        const j = mapRowsToJobs([row])[0];
-        byId.set(j.id, { ...(byId.get(j.id) || {}), ...j });
-      }
-      const next = Array.from(byId.values());
-      return next;
-    });
-  }, [mapRowsToJobs]);
-
-  // DEMO shortcut
+  // Setup realtime subscriptions for run mode
   useEffect(() => {
-    if (!isDemo) return;
-    const demoJobs: Job[] = [
-      {
-        id: "1",
-        title: "Senior Power BI Developer",
-        company: "TechCorp Inc.",
-        location: "Minneapolis, MN",
-        salary: "$95,000 - $120,000",
-        datePosted: "2025-03-28",
-        source: "Company Site",
-        url: "https://example.com/job/1",
-      },
-      {
-        id: "2",
-        title: "Business Intelligence Analyst",
-        company: "DataFlow Solutions",
-        location: "Remote",
-        salary: "$80,000 - $100,000",
-        datePosted: "2025-03-24",
-        source: "Job Board",
-        url: "https://example.com/job/2",
-      },
-    ];
-    setJobs(demoJobs);
-    setRunStatus("completed");
-  }, [isDemo]);
-
-  // Initialize client + load first data + realtime
-  useEffect(() => {
-    if (isDemo) return;
-
-    if (!runId) {
-      setRunStatus("failed");
-      return;
-    }
-
-    if (!jwt) {
-      toast({
-        title: "Access token missing",
-        description: "Please start a new search to view results.",
-        variant: "destructive",
-      });
-      navigate("/");
-      return;
-    }
-
-    if (jwtExp && Date.now() / 1000 > jwtExp) {
-      toast({
-        title: "Session expired",
-        description: "Please start a new search to view results.",
-        variant: "destructive",
-      });
-      navigate("/");
-      return;
-    }
+    if (mode !== "run" || !runId || !supabaseRef.current) return;
 
     let cancelled = false;
 
-    const init = async () => {
+    const setupRealtime = async () => {
       try {
-        // Create client and set auth for both REST & Realtime
-        const client = createJWTClient(jwt);
-        supabaseRef.current = client;
-
-        await client.auth.setSession({
-          access_token: jwt,
-          refresh_token: "",
-        });
-        client.realtime.setAuth(jwt);
-
-        // Initial fetch
-        const [{ data: runRow, error: runErr }, { data: jobsRows, error: jobsErr }] = await Promise.all([
-          client.from("runs").select("*").eq("run_id", runId).single(),
-          client.from("jobs").select("*").eq("run_id", runId).order("updated_at", { ascending: false }),
-        ]);
+        // Initial run data fetch
+        const { data: runRow, error: runErr } = await supabaseRef.current!
+          .from("runs")
+          .select("*")
+          .eq("run_id", runId)
+          .single();
 
         if (cancelled) return;
-
         if (runErr) throw runErr;
+
         setRunData(runRow);
         const phase: RunPhase =
-          runRow.status === "completed" ? "completed" : runRow.status === "failed" ? "failed" : "running";
+          runRow.status === "completed" ? "completed" : 
+          runRow.status === "failed" ? "failed" : "running";
         setRunStatus(phase);
-        statusRef.current = phase;
 
-        if (jobsErr) throw jobsErr;
-        setJobs(mapRowsToJobs(jobsRows || []));
-
-        // Realtime subscriptions
-        const channel = client.channel(`search-results-${runId}`);
+        // Setup realtime channel
+        const channel = supabaseRef.current!.channel(`search-results-${runId}`);
 
         channel
           .on(
@@ -248,41 +289,34 @@ const Results = () => {
               const newRun = payload.new as RunRow;
               setRunData(newRun);
               const nextPhase: RunPhase =
-                newRun.status === "completed" ? "completed" : newRun.status === "failed" ? "failed" : "running";
+                newRun.status === "completed" ? "completed" : 
+                newRun.status === "failed" ? "failed" : "running";
               setRunStatus(nextPhase);
-              statusRef.current = nextPhase;
             }
           )
           .on(
             "postgres_changes",
-            // Listen to BOTH inserts and updates (upserts may fire UPDATE)
             { event: "*", schema: "public", table: "jobs", filter: `run_id=eq.${runId}` },
-            (payload) => {
-              const row = payload.new as JobRow;
-              upsertJobsInState(row);
+            () => {
+              // Refetch jobs when new ones arrive
+              fetchJobs(currentPage);
             }
           )
-          .subscribe((status) => {
-            console.log("Realtime subscription status:", status);
-            if (status === "CHANNEL_ERROR") {
-              console.error("Realtime subscription error");
-            }
-          });
+          .subscribe();
 
         channelRef.current = channel;
       } catch (err: any) {
-        console.error("Error initializing results page:", err);
+        console.error("Error setting up realtime:", err);
         toast({
           title: "Error loading results",
           description: err.message || "Failed to load search results.",
           variant: "destructive",
         });
         setRunStatus("failed");
-        statusRef.current = "failed";
       }
     };
 
-    init();
+    setupRealtime();
 
     return () => {
       cancelled = true;
@@ -291,544 +325,244 @@ const Results = () => {
         channelRef.current = null;
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId, jwt, jwtExp, isDemo, navigate, toast]);
+  }, [mode, runId, fetchJobs, currentPage, toast]);
 
-  // Polling fallback that respects *current* runStatus
+  // Fetch jobs when page or filters change
   useEffect(() => {
-    if (isDemo) return;
-    if (!supabaseRef.current || !runId) return;
-
-    // only poll while running/loading
-    if (runStatus === "completed" || runStatus === "failed") {
-      if (pollTimerRef.current) {
-        window.clearInterval(pollTimerRef.current);
-        pollTimerRef.current = null;
-      }
-      return;
+    if (supabaseRef.current) {
+      fetchJobs(currentPage);
     }
+  }, [fetchJobs, currentPage]);
 
-    const tick = async () => {
-      try {
-        const { data, error } = await supabaseRef.current!
-          .from("jobs")
-          .select("*")
-          .eq("run_id", runId)
-          .order("updated_at", { ascending: false });
-
-        if (error) {
-          if ((error as any).code === "PGRST303") {
-            console.warn("JWT expired — stopping polling");
-            toast({
-              title: "Session expired",
-              description: "Please start a new search to refresh access.",
-              variant: "destructive",
-            });
-            setRunStatus("failed");
-            statusRef.current = "failed";
-          } else {
-            console.error("Error fetching jobs:", error);
-          }
-          return;
-        }
-
-        // Merge/Upsert
-        upsertJobsInState(data || []);
-      } catch (e) {
-        console.error("Error in polling tick:", e);
-      }
-    };
-
-    // kick once, then every 5s
-    tick();
-    const id = window.setInterval(tick, 5000);
-    pollTimerRef.current = id;
-
-    return () => {
-      if (pollTimerRef.current) {
-        window.clearInterval(pollTimerRef.current);
-        pollTimerRef.current = null;
-      }
-    };
-  }, [isDemo, runId, runStatus, upsertJobsInState, toast]);
-
-  // Auto-select first job
+  // Fetch filter suggestions on mount
   useEffect(() => {
-    if (jobs.length > 0 && !selectedJob) {
-      setSelectedJob(jobs[0].id);
-    }
-  }, [jobs, selectedJob]);
+    fetchFilterSuggestions();
+  }, [fetchFilterSuggestions]);
+
+  // Reset page when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [filters]);
 
   // Fetch contacts when job is selected
   useEffect(() => {
-    if (!selectedJob || !supabaseRef.current || !runId || isDemo) return;
+    if (!selectedJobId || !supabaseRef.current) return;
 
     const fetchContacts = async () => {
       setContactsLoading(true);
       setContacts([]);
-      setSelectedContact(null);
+      setSelectedContactId(null);
 
       try {
-        const selectedJobData = jobs.find(j => j.id === selectedJob);
-        if (!selectedJobData) return;
+        const job = jobs.find(j => j.id === selectedJobId);
+        if (!job?.company_id) return;
 
-        // Query by company name to find contacts
-        const { data: companiesData, error: companiesError } = await supabaseRef.current!
-          .from('companies')
-          .select('company_id')
-          .ilike('name', selectedJobData.company);
+        const { data: contactsData, error } = await supabaseRef.current!
+          .from('contacts')
+          .select('*')
+          .eq('company_id', job.company_id);
 
-        if (companiesError) throw companiesError;
+        if (error) throw error;
 
-        if (companiesData && companiesData.length > 0) {
-          const companyIds = companiesData.map(c => c.company_id);
-          
-          const { data: contactsData, error: contactsError } = await supabaseRef.current!
-            .from('contacts')
-            .select('*')
-            .in('company_id', companyIds);
+        const mappedContacts: Contact[] = (contactsData || []).map((contact: ContactRow) => ({
+          id: contact.contact_id,
+          name: contact.name || 'Unknown',
+          title: contact.title || undefined,
+          email: contact.email || undefined,
+          linkedin: contact.linkedin || undefined,
+          phone: contact.phone || undefined,
+          email_status: contact.email_status || undefined
+        }));
 
-          if (contactsError) throw contactsError;
+        setContacts(mappedContacts);
 
-          const mappedContacts = (contactsData || []).map((contact: ContactRow) => ({
-            id: contact.contact_id,
-            name: contact.name || 'Unknown',
-            title: contact.title || '',
-            email: contact.email || undefined,
-            linkedin: contact.linkedin || undefined,
-            phone: contact.phone || undefined,
-            verified: contact.email_status || 'unverified'
-          }));
-
-          setContacts(mappedContacts);
+        // Auto-select first contact
+        if (mappedContacts.length > 0) {
+          setSelectedContactId(mappedContacts[0].id);
         }
       } catch (error) {
         console.error('Error fetching contacts:', error);
+        toast({
+          title: "Error loading contacts",
+          description: "Failed to load contact information.",
+          variant: "destructive",
+        });
       } finally {
         setContactsLoading(false);
       }
     };
 
     fetchContacts();
-  }, [selectedJob, jobs, runId, isDemo]);
+  }, [selectedJobId, jobs, toast]);
 
-  // Auto-select first contact
-  useEffect(() => {
-    if (contacts.length > 0 && !selectedContact) {
-      setSelectedContact(contacts[0].id);
-    } else if (contacts.length === 0) {
-      setSelectedContact(null);
+  // Handle page changes
+  const handlePageChange = (page: number) => {
+    setCurrentPage(page);
+  };
+
+  // Handle filter changes
+  const handleFiltersChange = (newFilters: JobFiltersState) => {
+    setFilters(newFilters);
+  };
+
+  // Handle job selection
+  const handleJobSelect = (jobId: string) => {
+    setSelectedJobId(jobId);
+  };
+
+  // Handle contact selection
+  const handleContactSelect = (contactId: string) => {
+    setSelectedContactId(contactId);
+  };
+
+  // Handle AI message generation (placeholder)
+  const handleGenerateMessage = async (contactId: string, jobId: string) => {
+    setIsGeneratingMessage(true);
+    try {
+      // Placeholder - will implement webhook call later
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      toast({
+        title: "Message generated",
+        description: "AI message has been generated successfully.",
+      });
+    } catch (error) {
+      toast({
+        title: "Generation failed",
+        description: "Failed to generate AI message.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsGeneratingMessage(false);
     }
-  }, [contacts, selectedContact]);
+  };
 
-  // Generate placeholder message when contact is selected
-  useEffect(() => {
-    if (selectedContact && contacts.length > 0) {
-      const contact = contacts.find(c => c.id === selectedContact);
-      if (contact) {
-        const selectedJobData = jobs.find(j => j.id === selectedJob);
-        setMessageData({
-          subject: `Exploring opportunities at ${selectedJobData?.company || 'your company'}`,
-          body: `Hi ${contact.name.split(' ')[0]},
+  const totalPages = Math.ceil(totalCount / JOBS_PER_PAGE);
 
-I hope this message finds you well. I came across the ${selectedJobData?.title || 'position'} role at ${selectedJobData?.company || 'your company'} and was immediately drawn to your team's work.
-
-With my background and passion for the field, I believe I could contribute significantly to your continued success.
-
-Would you be available for a brief conversation about this opportunity?
-
-Best regards`
-        });
-      }
+  // Header content based on mode
+  const getHeaderContent = () => {
+    if (mode === "run") {
+      const searchType = role ? "Role Search" : company ? "Company Search" : "Search";
+      const searchQuery = role || company || "";
+      
+      return (
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 bg-gradient-primary rounded-lg flex items-center justify-center">
+            <Target className="w-5 h-5 text-primary-foreground" />
+          </div>
+          <div>
+            <h1 className="text-xl font-semibold text-foreground">{searchType} Results</h1>
+            <p className="text-sm text-muted-foreground">
+              {searchQuery} {locationParam && `• ${locationParam}`}
+            </p>
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            <Badge variant={runStatus === "completed" ? "secondary" : runStatus === "failed" ? "destructive" : "default"}>
+              {runStatus === "loading" && <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
+              {runStatus.charAt(0).toUpperCase() + runStatus.slice(1)}
+            </Badge>
+            {runStatus === "running" && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => fetchJobs(currentPage)}
+              >
+                <RefreshCw className="w-4 h-4" />
+              </Button>
+            )}
+          </div>
+        </div>
+      );
     } else {
-      setMessageData({ subject: "", body: "" });
+      return (
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 bg-gradient-primary rounded-lg flex items-center justify-center">
+            <Target className="w-5 h-5 text-primary-foreground" />
+          </div>
+          <div>
+            <h1 className="text-xl font-semibold text-foreground">Browse All Jobs</h1>
+            <p className="text-sm text-muted-foreground">
+              Explore all available positions with advanced filtering
+            </p>
+          </div>
+        </div>
+      );
     }
-  }, [selectedContact, contacts, selectedJob, jobs]);
-
-  const handleCopyMessage = () => {
-    const fullMessage = `Subject: ${messageData.subject}\n\n${messageData.body}`;
-    navigator.clipboard.writeText(fullMessage);
-    toast({
-      title: "Message copied to clipboard",
-      description: "You can now paste it into your email client.",
-    });
-  };
-
-  const handleRegenerateMessage = () => {
-    toast({
-      title: "Message regenerated",
-      description: "AI has generated a new personalized message.",
-    });
-  };
-
-  const getVerificationBadge = (status: string) => {
-    switch (status) {
-      case "verified":
-        return (
-          <Badge variant="verified" className="ml-2">
-            <CheckCircle className="w-3 h-3 mr-1" />
-            Verified
-          </Badge>
-        );
-      case "unverified":
-        return (
-          <Badge variant="unverified" className="ml-2">
-            <XCircle className="w-3 h-3 mr-1" />
-            Unverified
-          </Badge>
-        );
-      case "pending":
-        return (
-          <Badge variant="warning" className="ml-2">
-            <AlertCircle className="w-3 h-3 mr-1" />
-            Pending
-          </Badge>
-        );
-      default:
-        return null;
-    }
-  };
-
-  const getSourceBadge = (source?: string) =>
-    source ? <Badge variant="source">{source}</Badge> : null;
-
-  const handleGenerateMessage = async () => {
-    if (!selectedContact || !selectedJob) return;
-    
-    // Placeholder for now - will call webhook later
-    toast({
-      title: "Generate Outreach Message",
-      description: "Message generation feature coming soon!",
-    });
   };
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-gradient-surface">
       {/* Header */}
-      <header className="border-b bg-card">
+      <header className="border-b bg-card/50 backdrop-blur-sm">
         <div className="container mx-auto px-4 py-4">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <Button variant="ghost" size="sm" onClick={() => navigate("/")}>
-                <ArrowLeft className="w-4 h-4 mr-2" />
-                New Search
-              </Button>
-              <div>
-                <h1 className="text-lg font-semibold">Search Results</h1>
-                <p className="text-sm text-muted-foreground">
-                  {role} • {loc} •{" "}
-                  {runStatus === "completed"
-                    ? `${jobs.length} results`
-                    : runStatus === "running" || runStatus === "loading"
-                    ? "Processing..."
-                    : "Failed"}
-                </p>
-              </div>
-            </div>
+            <Button
+              variant="ghost"
+              onClick={() => navigate("/")}
+              className="mr-4"
+            >
+              <ArrowLeft className="w-4 h-4 mr-2" />
+              Back to Search
+            </Button>
+            {getHeaderContent()}
           </div>
         </div>
       </header>
 
       {/* Main Content */}
-      <div className="container mx-auto p-4">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[calc(100vh-8rem)]">
-          {/* Jobs Panel - Scrollable */}
-          <Card className="flex flex-col h-full">
-            <CardHeader className="pb-3 flex-shrink-0">
-              <CardTitle className="text-base flex items-center gap-2">
-                {(runStatus === "running" || runStatus === "loading") ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Building2 className="w-4 h-4" />
-                )}
-                Jobs ({jobs.length})
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="flex-1 overflow-y-auto space-y-3 p-4 min-h-0">
-              {runStatus === "loading" || runStatus === "running" ? (
-                <div className="text-center py-8 text-muted-foreground">
-                  <Loader2 className="w-8 h-8 mx-auto mb-2 animate-spin" />
-                  <p className="text-sm">Processing results...</p>
-                  <p className="text-xs mt-1">This may take a few moments</p>
+      <main className="container mx-auto px-4 py-6">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-[calc(100vh-12rem)]">
+          {/* Jobs Column */}
+          <div className="lg:col-span-4 flex flex-col">
+            <Card className="flex-1 flex flex-col">
+              <CardHeader className="pb-4">
+                <CardTitle>Jobs</CardTitle>
+              </CardHeader>
+              <CardContent className="flex-1 flex flex-col space-y-4">
+                <JobFilters
+                  filters={filters}
+                  onFiltersChange={handleFiltersChange}
+                  companySuggestions={companySuggestions}
+                  sourceSuggestions={sourceSuggestions}
+                  isLoading={runStatus === "loading"}
+                />
+                <div className="flex-1">
+                  <JobsList
+                    jobs={jobs}
+                    selectedJobId={selectedJobId}
+                    onJobSelect={handleJobSelect}
+                    isLoading={runStatus === "loading"}
+                    currentPage={currentPage}
+                    totalPages={totalPages}
+                    onPageChange={handlePageChange}
+                    totalCount={totalCount}
+                  />
                 </div>
-              ) : runStatus === "failed" ? (
-                <div className="text-center py-8 text-muted-foreground">
-                  <XCircle className="w-8 h-8 mx-auto mb-2 text-destructive" />
-                  <p className="text-sm">Search failed</p>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="mt-2"
-                    onClick={() => navigate("/")}
-                  >
-                    Try Again
-                  </Button>
-                </div>
-              ) : jobs.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground">
-                  <Building2 className="w-8 h-8 mx-auto mb-2" />
-                  <p className="text-sm">No results found</p>
-                  <p className="text-xs mt-1">Try adjusting your search criteria</p>
-                </div>
-              ) : (
-                jobs.map((job) => (
-                  <Card
-                    key={job.id}
-                    className={`cursor-pointer transition-all duration-200 hover:shadow-md ${
-                      selectedJob === job.id ? "ring-2 ring-primary shadow-md" : ""
-                    }`}
-                    onClick={() => setSelectedJob(job.id)}
-                  >
-                    <CardContent className="p-4">
-                      <div className="flex justify-between items-start mb-2">
-                        <h3 className="font-medium text-sm leading-tight">
-                          {job.title}
-                        </h3>
-                        {getSourceBadge(job.source)}
-                      </div>
-                      <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2">
-                        <Building2 className="w-3 h-3" />
-                        <span>{job.company}</span>
-                      </div>
-                      {job.location && (
-                        <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2">
-                          <MapPin className="w-3 h-3" />
-                          <span>{job.location}</span>
-                        </div>
-                      )}
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-4">
-                          {job.salary && (
-                            <div className="flex items-center gap-1 text-xs">
-                              <DollarSign className="w-3 h-3" />
-                              <span className="font-medium">{job.salary}</span>
-                            </div>
-                          )}
-                          {job.datePosted && (
-                            <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                              <Calendar className="w-3 h-3" />
-                              <span>{job.datePosted}</span>
-                            </div>
-                          )}
-                        </div>
-                        {job.url && (
-                          <Button variant="ghost" size="sm" asChild className="h-6 px-2">
-                            <a href={job.url} target="_blank" rel="noopener noreferrer">
-                              <ExternalLink className="w-3 h-3" />
-                            </a>
-                          </Button>
-                        )}
-                      </div>
-                    </CardContent>
-                  </Card>
-                ))
-              )}
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
+          </div>
 
-          {/* Contacts Panel */}
-          <Card className="flex flex-col">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base flex items-center gap-2">
-                {contactsLoading ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Users className="w-4 h-4" />
-                )}
-                Contacts ({contacts.length})
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="flex-1 overflow-y-auto space-y-3 p-4">
-              {!selectedJob ? (
-                <div className="text-center py-8 text-muted-foreground">
-                  <Users className="w-8 h-8 mx-auto mb-2" />
-                  <p className="text-sm">Select a job to view contacts</p>
-                </div>
-              ) : contactsLoading ? (
-                <div className="text-center py-8 text-muted-foreground">
-                  <Loader2 className="w-8 h-8 mx-auto mb-2 animate-spin" />
-                  <p className="text-sm">Fetching contacts for {jobs.find(j => j.id === selectedJob)?.company}...</p>
-                </div>
-              ) : contacts.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground">
-                  <Users className="w-8 h-8 mx-auto mb-2" />
-                  <p className="text-sm">No contacts found for this position</p>
-                  <p className="text-xs mt-1">Contact discovery in progress...</p>
-                </div>
-              ) : (
-                contacts.map((contact) => (
-                  <Card
-                    key={contact.id}
-                    className={`cursor-pointer transition-all duration-200 hover:shadow-md ${
-                      selectedContact === contact.id ? "ring-2 ring-primary shadow-md" : ""
-                    }`}
-                    onClick={() => setSelectedContact(contact.id)}
-                  >
-                    <CardContent className="p-4">
-                      <div className="flex items-start justify-between mb-2">
-                        <div>
-                          <h3 className="font-medium text-sm">{contact.name}</h3>
-                          <p className="text-xs text-muted-foreground">
-                            {contact.title}
-                          </p>
-                        </div>
-                        {(() => {
-                          switch (contact.verified) {
-                            case "verified":
-                              return (
-                                <Badge variant="verified" className="ml-2">
-                                  <CheckCircle className="w-3 h-3 mr-1" />
-                                  Verified
-                                </Badge>
-                              );
-                            case "unverified":
-                              return (
-                                <Badge variant="unverified" className="ml-2">
-                                  <XCircle className="w-3 h-3 mr-1" />
-                                  Unverified
-                                </Badge>
-                              );
-                            case "pending":
-                              return (
-                                <Badge variant="warning" className="ml-2">
-                                  <AlertCircle className="w-3 h-3 mr-1" />
-                                  Pending
-                                </Badge>
-                              );
-                            default:
-                              return null;
-                          }
-                        })()}
-                      </div>
+          {/* Contacts Column */}
+          <div className="lg:col-span-4">
+            <ContactsList
+              contacts={contacts}
+              selectedContactId={selectedContactId}
+              onContactSelect={handleContactSelect}
+              isLoading={contactsLoading}
+              companyName={selectedJob?.company}
+            />
+          </div>
 
-                      <Separator className="my-2" />
-
-                      <div className="space-y-1">
-                        {contact.email && (
-                          <div className="flex items-center gap-2 text-xs">
-                            <Mail className="w-3 h-3" />
-                            <span className="text-muted-foreground">{contact.email}</span>
-                            {contact.verified === "verified" ? (
-                              <div className="flex items-center gap-1 text-emerald-600">
-                                <CheckCircle className="w-3 h-3" />
-                                <span className="text-xs">Verified</span>
-                              </div>
-                            ) : contact.verified === "unverified" ? (
-                              <div className="flex items-center gap-1 text-red-500">
-                                <XCircle className="w-3 h-3" />
-                                <span className="text-xs">Not verified</span>
-                              </div>
-                            ) : null}
-                          </div>
-                        )}
-                        {contact.phone && (
-                          <div className="flex items-center gap-2 text-xs">
-                            <Phone className="w-3 h-3" />
-                            <span className="text-muted-foreground">{contact.phone}</span>
-                          </div>
-                        )}
-                        {contact.linkedin && (
-                          <div className="flex items-center gap-2 text-xs">
-                            <Linkedin className="w-3 h-3" />
-                            <a 
-                              href={contact.linkedin} 
-                              target="_blank" 
-                              rel="noopener noreferrer"
-                              className="text-primary hover:underline"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              LinkedIn Profile
-                            </a>
-                          </div>
-                        )}
-                      </div>
-                    </CardContent>
-                  </Card>
-                ))
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Message Panel */}
-          <Card className="flex flex-col">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base flex items-center gap-2">
-                <Mail className="w-4 h-4" />
-                AI-Generated Message
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="flex-1 flex flex-col p-4">
-              {!selectedContact ? (
-                <div className="text-center py-8 text-muted-foreground flex-1 flex items-center justify-center">
-                  <div>
-                    <Mail className="w-8 h-8 mx-auto mb-2" />
-                    <p className="text-sm">Select a contact to generate a message</p>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-4 flex-1 flex flex-col">
-                  <Button 
-                    onClick={handleGenerateMessage}
-                    className="w-full"
-                  >
-                    Generate Outreach Message
-                  </Button>
-                  <div className="space-y-2">
-                    <label className="text-xs font-medium text-muted-foreground">
-                      Subject
-                    </label>
-                    <Input
-                      value={messageData.subject}
-                      onChange={(e) =>
-                        setMessageData((prev) => ({ ...prev, subject: e.target.value }))
-                      }
-                      placeholder="Email subject..."
-                      className="text-sm"
-                    />
-                  </div>
-
-                  <div className="space-y-2 flex-1 flex flex-col">
-                    <label className="text-xs font-medium text-muted-foreground">
-                      Message
-                    </label>
-                    <Textarea
-                      value={messageData.body}
-                      onChange={(e) =>
-                        setMessageData((prev) => ({ ...prev, body: e.target.value }))
-                      }
-                      placeholder="AI-generated personalized message will appear here..."
-                      className="flex-1 min-h-[200px] text-sm resize-none"
-                    />
-                  </div>
-
-                  <div className="flex gap-2 pt-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleGenerateMessage}
-                      className="flex-1"
-                    >
-                      <RefreshCw className="w-3 h-3 mr-2" />
-                      Regenerate
-                    </Button>
-                    <Button size="sm" onClick={() => {
-                      const fullMessage = `Subject: ${messageData.subject}\n\n${messageData.body}`;
-                      navigator.clipboard.writeText(fullMessage);
-                      toast({
-                        title: "Message copied to clipboard",
-                        description: "You can now paste it into your email client.",
-                      });
-                    }} className="flex-1">
-                      <Copy className="w-3 h-3 mr-2" />
-                      Copy Message
-                    </Button>
-                  </div>
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          {/* Messages Column */}
+          <div className="lg:col-span-4">
+            <MessagePanel
+              selectedContact={selectedContact}
+              selectedJob={selectedJob}
+              onGenerateMessage={handleGenerateMessage}
+              isGenerating={isGeneratingMessage}
+            />
+          </div>
         </div>
-      </div>
+      </main>
     </div>
   );
 };
