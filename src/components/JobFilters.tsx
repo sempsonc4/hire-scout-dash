@@ -38,7 +38,9 @@ const JobFilters = ({
   const [showFilters, setShowFilters] = useState(false);
 
   const updateFilter = (key: keyof JobFiltersState, value: string | boolean) => {
-    onFiltersChange({ ...filters, [key]: value });
+    // Convert "all" back to empty string for filter logic
+    const filterValue = typeof value === 'string' && value === 'all' ? '' : value;
+    onFiltersChange({ ...filters, [key]: filterValue });
   };
 
   const clearFilters = () => {
@@ -107,7 +109,7 @@ const JobFilters = ({
                     <SelectValue placeholder="Select company..." />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">All companies</SelectItem>
+                    <SelectItem value="all">All companies</SelectItem>
                     {companySuggestions.map((company) => (
                       <SelectItem key={company} value={company}>
                         {company}
@@ -167,7 +169,7 @@ const JobFilters = ({
                     <SelectValue placeholder="Select source..." />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">All sources</SelectItem>
+                    <SelectItem value="all">All sources</SelectItem>
                     {sourceSuggestions.map((source) => (
                       <SelectItem key={source} value={source}>
                         {source}

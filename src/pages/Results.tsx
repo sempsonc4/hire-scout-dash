@@ -50,6 +50,7 @@ const Results = () => {
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
   const [runStatus, setRunStatus] = useState<RunPhase>("loading");
+  const [isJobsLoading, setIsJobsLoading] = useState(false);
   const [runData, setRunData] = useState<RunRow | null>(null);
   const [contactsLoading, setContactsLoading] = useState(false);
   const [isGeneratingMessage, setIsGeneratingMessage] = useState(false);
@@ -149,6 +150,7 @@ const Results = () => {
   const fetchJobs = useCallback(async (page: number = 1) => {
     if (!supabaseRef.current) return;
 
+    setIsJobsLoading(true);
     try {
       const offset = (page - 1) * JOBS_PER_PAGE;
       
@@ -215,8 +217,10 @@ const Results = () => {
         description: "Failed to load job listings. Please try again.",
         variant: "destructive",
       });
+    } finally {
+      setIsJobsLoading(false);
     }
-  }, [mode, runId, buildQuery, selectedJobId, toast]);
+  }, [mode, runId, buildQuery, selectedJobId, toast, supabaseRef]);
 
   // Fetch filter suggestions
   const fetchFilterSuggestions = useCallback(async () => {
@@ -523,14 +527,14 @@ const Results = () => {
                   onFiltersChange={handleFiltersChange}
                   companySuggestions={companySuggestions}
                   sourceSuggestions={sourceSuggestions}
-                  isLoading={runStatus === "loading"}
+                  isLoading={isJobsLoading}
                 />
                 <div className="flex-1">
                   <JobsList
                     jobs={jobs}
                     selectedJobId={selectedJobId}
                     onJobSelect={handleJobSelect}
-                    isLoading={runStatus === "loading"}
+                    isLoading={isJobsLoading}
                     currentPage={currentPage}
                     totalPages={totalPages}
                     onPageChange={handlePageChange}
