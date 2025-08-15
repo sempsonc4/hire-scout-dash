@@ -44,12 +44,21 @@ const Home = () => {
         body: form.toString(),
       });
 
+      // First get the text response to see what we actually received
+      const responseText = await res.text();
+      
       if (!res.ok) {
-        const txt = await res.text().catch(() => "");
-        throw new Error(`Start failed (${res.status}): ${txt || res.statusText}`);
+        throw new Error(`Start failed (${res.status}): ${responseText || res.statusText}`);
       }
 
-      const data = await res.json();
+      // Try to parse as JSON
+      let data;
+      try {
+        data = JSON.parse(responseText);
+      } catch (parseError) {
+        console.error("Response was not JSON:", responseText.substring(0, 200));
+        throw new Error(`Invalid response format. Expected JSON but received: ${responseText.substring(0, 100)}...`);
+      }
       
       // Expect { run_id, search_id, supabase_jwt, exp }
       if (!data.run_id || !data.supabase_jwt) {
