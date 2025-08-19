@@ -162,13 +162,12 @@ const JobsList = ({
                     )}
                   </div>
               
-                    {/* Salary if available */}
-                    {job.salary && (
-                      <div className="text-sm font-medium text-green-600">
-                        {job.salary}
-                      </div>
-                    )}
-                  </div>
+                  {/* Salary if available */}
+                  {job.salary && (
+                    <div className="text-sm font-medium text-green-600">
+                      {job.salary}
+                    </div>
+                  )}
 
                   {/* Footer */}
                   <div className="flex justify-between items-center">
