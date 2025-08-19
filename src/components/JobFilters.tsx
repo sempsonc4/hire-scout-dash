@@ -96,99 +96,104 @@ const JobFilters = ({
       {showFilters && (
         <Card>
           <CardContent className="pt-6">
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {/* Company Filter */}
-              <div className="space-y-2">
-                <Label>Company</Label>
-                <Select
-                  value={filters.company}
-                  onValueChange={(value) => updateFilter('company', value)}
-                  disabled={isLoading}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select company..." />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All companies</SelectItem>
-                    {companySuggestions.map((company) => (
-                      <SelectItem key={company} value={company}>
-                        {company}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              {/* Date Range */}
-              <div className="space-y-2">
-                <Label className="flex items-center gap-1">
-                  <Calendar className="w-4 h-4" />
-                  Posted From
-                </Label>
-                <Input
-                  type="date"
-                  value={filters.dateFrom}
-                  onChange={(e) => updateFilter('dateFrom', e.target.value)}
-                  disabled={isLoading}
-                />
-              </div>
-
-              <div className="space-y-2">
-                <Label className="flex items-center gap-1">
-                  <Calendar className="w-4 h-4" />
-                  Posted To
-                </Label>
-                <Input
-                  type="date"
-                  value={filters.dateTo}
-                  onChange={(e) => updateFilter('dateTo', e.target.value)}
-                  disabled={isLoading}
-                />
-              </div>
-
-              {/* Location */}
-              <div className="space-y-2">
-                <Label>Location</Label>
-                <Input
-                  placeholder="City, State or Remote"
-                  value={filters.location}
-                  onChange={(e) => updateFilter('location', e.target.value)}
-                  disabled={isLoading}
-                />
-              </div>
-
-              {/* Source */}
-              <div className="space-y-2">
-                <Label>Source</Label>
-                <Select
-                  value={filters.source}
-                  onValueChange={(value) => updateFilter('source', value)}
-                  disabled={isLoading}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select source..." />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All sources</SelectItem>
-                    {sourceSuggestions.map((source) => (
-                      <SelectItem key={source} value={source}>
-                        {source}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              {/* Has Contacts Toggle */}
-              <div className="space-y-2">
-                <Label>Contact Availability</Label>
-                <div className="flex items-center space-x-2">
-                  <Switch
-                    checked={filters.hasContacts}
-                    onCheckedChange={(checked) => updateFilter('hasContacts', checked)}
+            <div className="space-y-6">
+              {/* Primary Filters Row */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Company Filter */}
+                <div className="space-y-2">
+                  <Label>Company</Label>
+                  <Select
+                    value={filters.company}
+                    onValueChange={(value) => updateFilter('company', value)}
+                    disabled={isLoading}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select company..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All companies</SelectItem>
+                      {companySuggestions.map((company) => (
+                        <SelectItem key={company} value={company}>
+                          {company}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {/* Location */}
+                <div className="space-y-2">
+                  <Label>Location</Label>
+                  <Input
+                    placeholder="City, State or Remote"
+                    value={filters.location}
+                    onChange={(e) => updateFilter('location', e.target.value)}
                     disabled={isLoading}
                   />
-                  <Label className="text-sm">Has contacts</Label>
+                </div>
+              </div>
+
+              {/* Date Range Row */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label className="flex items-center gap-1">
+                    <Calendar className="w-4 h-4" />
+                    Posted From
+                  </Label>
+                  <Input
+                    type="date"
+                    value={filters.dateFrom}
+                    onChange={(e) => updateFilter('dateFrom', e.target.value)}
+                    disabled={isLoading}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label className="flex items-center gap-1">
+                    <Calendar className="w-4 h-4" />
+                    Posted To
+                  </Label>
+                  <Input
+                    type="date"
+                    value={filters.dateTo}
+                    onChange={(e) => updateFilter('dateTo', e.target.value)}
+                    disabled={isLoading}
+                  />
+                </div>
+              </div>
+
+              {/* Secondary Filters Row */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Source */}
+                <div className="space-y-2">
+                  <Label>Source</Label>
+                  <Select
+                    value={filters.source}
+                    onValueChange={(value) => updateFilter('source', value)}
+                    disabled={isLoading}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select source..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All sources</SelectItem>
+                      {sourceSuggestions.map((source) => (
+                        <SelectItem key={source} value={source}>
+                          {source}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {/* Has Contacts Toggle */}
+                <div className="space-y-2">
+                  <Label>Contact Availability</Label>
+                  <div className="flex items-center space-x-2 h-10">
+                    <Switch
+                      checked={filters.hasContacts}
+                      onCheckedChange={(checked) => updateFilter('hasContacts', checked)}
+                      disabled={isLoading}
+                    />
+                    <Label className="text-sm">Has contacts</Label>
+                  </div>
                 </div>
               </div>
             </div>

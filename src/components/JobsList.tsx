@@ -11,7 +11,7 @@ import {
   ExternalLink, 
   ChevronLeft, 
   ChevronRight,
-  Users
+  User
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -123,7 +123,7 @@ const JobsList = ({
             <Card
               key={job.id}
               className={cn(
-                "cursor-pointer transition-all duration-200 hover:shadow-md",
+                "cursor-pointer transition-all duration-200 hover:shadow-md mx-1",
                 selectedJobId === job.id && "ring-2 ring-primary shadow-md"
               )}
               onClick={() => onJobSelect(job.id)}
@@ -139,27 +139,37 @@ const JobsList = ({
                       <Building2 className="w-4 h-4" />
                       <span>{job.company}</span>
                       {job.hasContacts && (
-                        <Badge variant="secondary" className="text-xs">
-                          <Users className="w-3 h-3 mr-1" />
-                          Contacts
-                        </Badge>
+                        <div className="w-5 h-5 bg-muted rounded-full flex items-center justify-center">
+                          <User className="w-3 h-3 text-muted-foreground" />
+                        </div>
                       )}
                     </div>
                   </div>
 
                   {/* Details */}
-                  <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+                  <div className="space-y-1">
                     {job.location && (
-                      <div className="flex items-center gap-1">
+                      <div className="flex items-center gap-1 text-xs text-muted-foreground">
                         <MapPin className="w-3 h-3" />
                         <span>{job.location}</span>
                       </div>
                     )}
+                    
+                    {/* Salary if available */}
+                    {job.salary && (
+                      <div className="text-sm font-medium text-green-600">
+                        {job.salary}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Date */}
+                  <div className="flex items-center gap-1 text-xs text-muted-foreground">
                     {job.posted_at && (
-                      <div className="flex items-center gap-1">
+                      <>
                         <Calendar className="w-3 h-3" />
                         <span>{formatDate(job.posted_at)}</span>
-                      </div>
+                      </>
                     )}
                   </div>
 
@@ -179,17 +189,10 @@ const JobsList = ({
                         }}
                       >
                         <ExternalLink className="w-3 h-3 mr-1" />
-                        View
+                        View Job
                       </Button>
                     )}
                   </div>
-
-                  {/* Salary if available */}
-                  {job.salary && (
-                    <div className="text-sm font-medium text-green-600">
-                      {job.salary}
-                    </div>
-                  )}
                 </div>
               </CardContent>
             </Card>

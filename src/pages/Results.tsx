@@ -548,9 +548,9 @@ const Results = () => {
 
       {/* Main */}
       <main className="container mx-auto px-4 py-6">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-[calc(100vh-12rem)]">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 h-[calc(100vh-12rem)]">
           {/* Jobs Column */}
-          <div className="lg:col-span-4 flex flex-col">
+          <div className="lg:col-span-5 flex flex-col">
             <Card className="flex-1 flex flex-col shadow-professional-md">
               <CardHeader className="pb-4 border-b bg-muted/20">
                 <CardTitle className="flex items-center gap-2">
@@ -568,7 +568,7 @@ const Results = () => {
                     isLoading={isJobsLoading}
                   />
                 </div>
-                <div className="flex-1 overflow-hidden px-4 pb-4">
+                <div className="flex-1 overflow-hidden pr-2 pb-4">
                   <JobsList
                     jobs={jobs}
                     selectedJobId={selectedJobId}
@@ -598,7 +598,7 @@ const Results = () => {
           </div>
 
           {/* Message Column */}
-          <div className="lg:col-span-4 flex flex-col">
+          <div className="lg:col-span-3 flex flex-col">
             <div className="flex-1 overflow-hidden">
               <MessagePanel
                 selectedContact={selectedContact}
