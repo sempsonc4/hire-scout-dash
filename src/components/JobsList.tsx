@@ -154,22 +154,19 @@ const JobsList = ({
                         <span>{job.location}</span>
                       </div>
                     )}
-                    
+                    {job.posted_at && (
+                      <div className="flex items-center gap-1">
+                        <Calendar className="w-3 h-3" />
+                        <span>{formatDate(job.posted_at)}</span>
+                      </div>
+                    )}
+                  </div>
+              
                     {/* Salary if available */}
                     {job.salary && (
                       <div className="text-sm font-medium text-green-600">
                         {job.salary}
                       </div>
-                    )}
-                  </div>
-
-                  {/* Date */}
-                  <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                    {job.posted_at && (
-                      <>
-                        <Calendar className="w-3 h-3" />
-                        <span>{formatDate(job.posted_at)}</span>
-                      </>
                     )}
                   </div>
 
