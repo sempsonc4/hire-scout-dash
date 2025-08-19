@@ -21,7 +21,7 @@ type JobReadRow = {
   title: string | null;
   company_name: string | null;
   company_id: string | null;              // may exist in base view; not always populated
-  company_id_resolved: string | null;     // COALESCE of link/alias/name in view
+  company_id_resolved: string | null;     // NEW from v_jobs_read_plus (COALESCE of link/alias/name)
   location: string | null;
   salary: string | null;
   posted_at: string | null;
@@ -29,7 +29,7 @@ type JobReadRow = {
   source_type: string | null;
   link: string | null;
   created_at: string | null;
-  contact_count: number | null;
+  contact_count: number | null;           // NEW from v_jobs_read_plus
 };
 
 type ContactReadRow = {
@@ -92,7 +92,7 @@ const Results = () => {
     hasContacts: false,
   });
 
-  // Suggestions
+  // Suggestions for filters
   const [companySuggestions, setCompanySuggestions] = useState<string[]>([]);
   const [sourceSuggestions, setSourceSuggestions] = useState<string[]>([]);
 
@@ -105,7 +105,7 @@ const Results = () => {
   const jwt = state?.jwt;
   const jwtExp = state?.exp;
 
-  // Selected objects
+  // Selected job/contact objects
   const selectedJob = jobs.find(j => j.id === selectedJobId) || null;
   const selectedContact = contacts.find(c => c.id === selectedContactId) || null;
 
@@ -135,6 +135,7 @@ const Results = () => {
     let q = base;
 
     if (filters.search) {
+      // search in title + company_name
       q = q.or(`title.ilike.%${filters.search}%,company_name.ilike.%${filters.search}%`);
     }
     if (filters.company) {
@@ -159,7 +160,7 @@ const Results = () => {
     return q;
   }, [filters]);
 
-  // Fetch jobs (paged)
+  // Fetch jobs from v_jobs_read_plus (paged)
   const fetchJobs = useCallback(
     async (page: number = 1) => {
       if (!supabaseRef.current) return;
@@ -176,6 +177,7 @@ const Results = () => {
         }
 
         const query = buildJobViewQuery(base)
+          // Prefer newest by posted_at, fallback to created_at
           .order("posted_at", { ascending: false, nullsFirst: false })
           .order("created_at", { ascending: false })
           .range(offset, offset + JOBS_PER_PAGE - 1);
@@ -192,6 +194,7 @@ const Results = () => {
           id: row.job_id,
           title: row.title || "",
           company: row.company_name || "",
+          // Use resolved id from the view
           company_id: row.company_id_resolved || row.company_id || undefined,
           location: row.location || undefined,
           salary: row.salary || undefined,
@@ -205,6 +208,7 @@ const Results = () => {
         setJobs(mapped);
         setTotalCount(count || 0);
 
+        // Auto-select the first job when none selected
         if (mapped.length > 0 && !selectedJobId) {
           setSelectedJobId(mapped[0].id);
         }
@@ -222,7 +226,7 @@ const Results = () => {
     [mode, runId, buildJobViewQuery, selectedJobId, toast]
   );
 
-  // Suggestions once
+  // Suggestions (companies, sources) from v_jobs_read_plus
   const fetchFilterSuggestions = useCallback(async () => {
     if (!supabaseRef.current) return;
     try {
@@ -246,7 +250,7 @@ const Results = () => {
     }
   }, []);
 
-  // Realtime listeners (run mode)
+  // Realtime: listen to base tables; refetch page on changes during a run
   useEffect(() => {
     if (mode !== "run" || !runId || !supabaseRef.current) return;
 
@@ -254,6 +258,7 @@ const Results = () => {
 
     const setup = async () => {
       try {
+        // Fetch initial run row to derive status badge
         const { data: runRow, error } = await supabaseRef.current
           .from("runs")
           .select("*")
@@ -289,13 +294,13 @@ const Results = () => {
         .on(
           "postgres_changes",
           { event: "*", schema: "public", table: "company_jobs" },
-          () => fetchJobs(currentPage)
+          () => fetchJobs(currentPage) // links affect company_id_resolved & contact_count
         )
         .on(
           "postgres_changes",
           { event: "*", schema: "public", table: "contacts" },
           () => {
-            fetchJobs(currentPage);
+            fetchJobs(currentPage); // contact_count may change
             if (selectedJobId) {
               loadContactsForSelectedJob(selectedJobId);
             }
@@ -341,7 +346,7 @@ const Results = () => {
     setCurrentPage(1);
   }, [filters]);
 
-  // Load contacts for a given job
+  // Load contacts for a given job (from v_contacts_read) using company_id_resolved
   const loadContactsForSelectedJob = useCallback(
     async (jobId: string) => {
       if (!supabaseRef.current) return;
@@ -396,16 +401,25 @@ const Results = () => {
     if (selectedJobId) loadContactsForSelectedJob(selectedJobId);
   }, [selectedJobId, loadContactsForSelectedJob]);
 
-  // Generate message via n8n webhook, then read from DB
+  // Handlers
+  const handlePageChange = (page: number) => setCurrentPage(page);
+  const handleFiltersChange = (f: JobFiltersState) => setFilters(f);
+  const handleJobSelect = (jobId: string) => setSelectedJobId(jobId);
+  const handleContactSelect = (contactId: string) => setSelectedContactId(contactId);
+
+  // Message generator using n8n webhook
   const handleGenerateMessage = async (contactId: string, jobId: string) => {
     setIsGeneratingMessage(true);
     try {
       const contact = contacts.find(c => c.id === contactId);
       const job = jobs.find(j => j.id === jobId);
-
+      
+      // Step 1: Call webhook to generate message
       const response = await fetch("https://n8n.srv930021.hstgr.cloud/webhook/message/generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
           contact_id: contactId,
           job_id: jobId,
@@ -415,22 +429,31 @@ const Results = () => {
         }),
       });
 
-      if (!response.ok) throw new Error(response.statusText);
-      const webhookResult = await response.json();
+      if (!response.ok) {
+        throw new Error(response.statusText);
+      }
 
+      const webhookResult = await response.json();
+      
       if (!webhookResult.ok || !webhookResult.message_id) {
         throw new Error("Invalid webhook response");
       }
 
+      // Step 2: Fetch the generated message from Supabase
       const { data: messageData, error } = await supabaseRef.current!
         .from('outreach_messages' as any)
         .select('message_id, contact_id, job_id, company_id, subject, body, preview_text, tone, template_version, variant, status, updated_at')
         .eq('message_id', webhookResult.message_id)
         .single();
 
-      if (error) throw new Error(`Failed to fetch message: ${error.message}`);
-      if (!messageData) throw new Error("Generated message not found");
+      if (error) {
+        throw new Error(`Failed to fetch message: ${error.message}`);
+      }
 
+      if (!messageData) {
+        throw new Error("Generated message not found");
+      }
+      
       toast({
         title: "Message generated",
         description: "AI outreach message has been generated successfully.",
@@ -560,11 +583,6 @@ const Results = () => {
               selectedJob={selectedJob}
               onGenerateMessage={handleGenerateMessage}
               isGenerating={isGeneratingMessage}
-              /* === UI tweaks for your request === */
-              initialSubject=""           // no placeholder subject before generation
-              initialBody=""              // no placeholder body before generation
-              generateLabel="Generate Message" // rename button
-              showRegenerate={false}      // hide/disable separate Regenerate button
             />
           </div>
         </div>
