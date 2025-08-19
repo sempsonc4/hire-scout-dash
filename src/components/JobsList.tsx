@@ -147,9 +147,9 @@ const JobsList = ({
                   </div>
 
                   {/* Details */}
-                  <div className="space-y-1">
+                  <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
                     {job.location && (
-                      <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                      <div className="flex items-center gap-1">
                         <MapPin className="w-3 h-3" />
                         <span>{job.location}</span>
                       </div>
