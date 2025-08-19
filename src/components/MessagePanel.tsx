@@ -85,9 +85,14 @@ Best regards`,
           body: result.body || "",
           channel: result.channel || "email"
         });
+        
+        toast({
+          title: "Message generated",
+          description: `AI ${result.channel || 'email'} message generated successfully.`,
+        });
       }
     } catch (error) {
-      // Error handling is done in the parent component
+      // Error handling is already done in the parent component
     }
   };
 
@@ -192,6 +197,24 @@ Best regards`,
             Regenerate
           </Button>
         </div>
+
+        {/* Generated Message Metadata */}
+        {generatedMessage && (
+          <div className="pt-4 border-t">
+            <div className="text-xs text-muted-foreground space-y-1">
+              <div className="font-medium">Message Details:</div>
+              {generatedMessage.tone && (
+                <div>Tone: {generatedMessage.tone}</div>
+              )}
+              {generatedMessage.status && (
+                <div>Status: {generatedMessage.status}</div>
+              )}
+              {generatedMessage.template_version && (
+                <div>Template: {generatedMessage.template_version}</div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Contact Info Summary */}
         <div className="pt-4 border-t">

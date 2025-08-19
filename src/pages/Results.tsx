@@ -414,6 +414,7 @@ const Results = () => {
       const contact = contacts.find(c => c.id === contactId);
       const job = jobs.find(j => j.id === jobId);
       
+      // Step 1: Call webhook to generate message
       const response = await fetch("https://n8n.srv930021.hstgr.cloud/webhook/message/generate", {
         method: "POST",
         headers: {
@@ -432,21 +433,40 @@ const Results = () => {
         throw new Error(response.statusText);
       }
 
-      const result = await response.json();
+      const webhookResult = await response.json();
+      
+      if (!webhookResult.ok || !webhookResult.message_id) {
+        throw new Error("Invalid webhook response");
+      }
+
+      // Step 2: Fetch the generated message from Supabase
+      const { data: messageData, error } = await supabaseRef.current!
+        .from('outreach_messages' as any)
+        .select('message_id, contact_id, job_id, company_id, subject, body, preview_text, tone, template_version, variant, status, updated_at')
+        .eq('message_id', webhookResult.message_id)
+        .single();
+
+      if (error) {
+        throw new Error(`Failed to fetch message: ${error.message}`);
+      }
+
+      if (!messageData) {
+        throw new Error("Generated message not found");
+      }
       
       toast({
         title: "Message generated",
         description: "AI outreach message has been generated successfully.",
       });
 
-      // The MessagePanel will be updated to handle the generated message
-      return result;
+      return messageData;
     } catch (error: any) {
       toast({
         title: "Generation failed",
         description: error.message || "Failed to generate AI message.",
         variant: "destructive",
       });
+      throw error;
     } finally {
       setIsGeneratingMessage(false);
     }
