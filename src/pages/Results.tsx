@@ -550,7 +550,7 @@ const Results = () => {
       <main className="container mx-auto px-4 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 h-[calc(100vh-12rem)]">
           {/* Jobs Column */}
-          <div className="lg:col-span-5 flex flex-col">
+          <div className="lg:col-span-4 flex flex-col">
             <Card className="flex-1 flex flex-col shadow-professional-md">
               <CardHeader className="pb-4 border-b bg-muted/20">
                 <CardTitle className="flex items-center gap-2">
