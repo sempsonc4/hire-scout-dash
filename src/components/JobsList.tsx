@@ -210,7 +210,7 @@ const JobsList = ({
           </Button>
           
           <div className="flex gap-1">
-            {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+            {Array.from({ length: Math.min(3, totalPages) }, (_, i) => {
               const page = i + 1;
               return (
                 <Button
@@ -224,7 +224,7 @@ const JobsList = ({
                 </Button>
               );
             })}
-            {totalPages > 5 && (
+            {totalPages > 3 && (
               <>
                 <span className="flex items-center px-2">...</span>
                 <Button
