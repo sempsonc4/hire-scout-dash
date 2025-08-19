@@ -22,6 +22,7 @@ export interface Contact {
   linkedin?: string;
   phone?: string;
   email_status?: string;
+  company_id?: string;
 }
 
 interface ContactsListProps {

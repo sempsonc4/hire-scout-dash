@@ -20,7 +20,7 @@ import type { Job } from "./JobsList";
 interface MessagePanelProps {
   selectedContact: Contact | null;
   selectedJob: Job | null;
-  onGenerateMessage?: (contactId: string, jobId: string) => Promise<void>;
+  onGenerateMessage?: (contactId: string, jobId: string) => Promise<any>;
   isGenerating?: boolean;
 }
 
@@ -33,8 +33,10 @@ const MessagePanel = ({
   const { toast } = useToast();
   const [messageData, setMessageData] = useState({
     subject: "",
-    body: ""
+    body: "",
+    channel: "email" as "email" | "linkedin"
   });
+  const [generatedMessage, setGeneratedMessage] = useState<any>(null);
 
   // Generate placeholder message when contact/job changes
   React.useEffect(() => {
@@ -50,15 +52,18 @@ With my background and passion for the field, I believe I could contribute signi
 
 Would you be available for a brief conversation about this opportunity?
 
-Best regards`
+Best regards`,
+        channel: "email"
       });
     } else {
-      setMessageData({ subject: "", body: "" });
+      setMessageData({ subject: "", body: "", channel: "email" });
     }
   }, [selectedContact, selectedJob]);
 
   const handleCopyMessage = () => {
-    const fullMessage = `Subject: ${messageData.subject}\n\n${messageData.body}`;
+    const fullMessage = messageData.channel === "email" 
+      ? `Subject: ${messageData.subject}\n\n${messageData.body}`
+      : messageData.body;
     navigator.clipboard.writeText(fullMessage);
     toast({
       title: "Message copied",
@@ -68,34 +73,21 @@ Best regards`
 
   const handleGenerateMessage = async () => {
     if (!selectedContact || !selectedJob || !onGenerateMessage) {
-      // Placeholder behavior for now
-      setMessageData({
-        subject: `Re: ${selectedJob?.title} opportunity at ${selectedJob?.company}`,
-        body: `(Placeholder) Personalized outreach will appear here.
-
-This AI-generated message would be tailored based on:
-- Contact: ${selectedContact?.name} (${selectedContact?.title})
-- Job: ${selectedJob?.title} at ${selectedJob?.company}
-- Company insights and personalization
-
-Coming soon: Real AI message generation!`
-      });
-      
-      toast({
-        title: "AI Message Generated",
-        description: "A placeholder message has been generated. Real AI integration coming soon!",
-      });
       return;
     }
 
     try {
-      await onGenerateMessage(selectedContact.id, selectedJob.id);
+      const result = await onGenerateMessage(selectedContact.id, selectedJob.id);
+      if (result) {
+        setGeneratedMessage(result);
+        setMessageData({
+          subject: result.subject || `Re: ${selectedJob.title} opportunity at ${selectedJob.company}`,
+          body: result.body || "",
+          channel: result.channel || "email"
+        });
+      }
     } catch (error) {
-      toast({
-        title: "Generation failed",
-        description: "Failed to generate AI message. Please try again.",
-        variant: "destructive",
-      });
+      // Error handling is done in the parent component
     }
   };
 
@@ -140,7 +132,7 @@ Coming soon: Real AI message generation!`
         {/* Generate Button */}
         <Button
           onClick={handleGenerateMessage}
-          disabled={isGenerating}
+          disabled={isGenerating || !selectedContact || !selectedJob}
           className="w-full"
         >
           {isGenerating ? (
@@ -148,30 +140,32 @@ Coming soon: Real AI message generation!`
           ) : (
             <Wand2 className="w-4 h-4 mr-2" />
           )}
-          {isGenerating ? "Generating..." : "Generate AI Message"}
+          {isGenerating ? "Generating..." : "Generate Outreach"}
         </Button>
 
         <Separator />
 
-        {/* Subject */}
-        <div className="space-y-2">
-          <Label htmlFor="subject">Subject</Label>
-          <Input
-            id="subject"
-            value={messageData.subject}
-            onChange={(e) => setMessageData(prev => ({ ...prev, subject: e.target.value }))}
-            placeholder="Email subject line"
-          />
-        </div>
+        {/* Subject (Email only) */}
+        {messageData.channel === "email" && (
+          <div className="space-y-2">
+            <Label htmlFor="subject">Subject</Label>
+            <Input
+              id="subject"
+              value={messageData.subject}
+              onChange={(e) => setMessageData(prev => ({ ...prev, subject: e.target.value }))}
+              placeholder="Email subject line"
+            />
+          </div>
+        )}
 
         {/* Message Body */}
         <div className="space-y-2">
-          <Label htmlFor="message">Message</Label>
+          <Label htmlFor="message">{messageData.channel === "email" ? "Message" : "LinkedIn Message"}</Label>
           <Textarea
             id="message"
             value={messageData.body}
             onChange={(e) => setMessageData(prev => ({ ...prev, body: e.target.value }))}
-            placeholder="Your personalized message will appear here..."
+            placeholder={`Your personalized ${messageData.channel} message will appear here...`}
             className="min-h-[300px] resize-none"
           />
         </div>

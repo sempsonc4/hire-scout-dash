@@ -169,7 +169,7 @@ const Results = () => {
         const offset = (page - 1) * JOBS_PER_PAGE;
 
         let base = supabaseRef.current
-          .from("v_jobs_read_plus")
+          .from("v_jobs_read_plus" as any)
           .select("*", { count: "exact" });
 
         if (mode === "run" && runId) {
@@ -231,16 +231,16 @@ const Results = () => {
     if (!supabaseRef.current) return;
     try {
       const [{ data: compData }, { data: srcData }] = await Promise.all([
-        supabaseRef.current.from("v_jobs_read_plus").select("company_name").not("company_name", "is", null).limit(200),
-        supabaseRef.current.from("v_jobs_read_plus").select("source, source_type").limit(200),
+        supabaseRef.current.from("v_jobs_read_plus" as any).select("company_name").not("company_name", "is", null).limit(200),
+        supabaseRef.current.from("v_jobs_read_plus" as any).select("source, source_type").limit(200),
       ]);
 
       if (compData) {
-        const uniq = [...new Set(compData.map(r => r.company_name).filter(Boolean) as string[])].sort();
+        const uniq = [...new Set((compData as any[]).map(r => r.company_name).filter(Boolean) as string[])].sort();
         setCompanySuggestions(uniq);
       }
       if (srcData) {
-        const all = (srcData as { source: string | null; source_type: string | null }[])
+        const all = (srcData as any[])
           .flatMap(r => [r.source, r.source_type].filter(Boolean) as string[]);
         const uniq = [...new Set(all)].sort();
         setSourceSuggestions(uniq);
@@ -362,14 +362,14 @@ const Results = () => {
         }
 
         const { data, error } = await supabaseRef.current
-          .from("v_contacts_read")
+          .from("v_contacts_read" as any)
           .select("*")
           .eq("company_id", job.company_id)
           .order("title", { ascending: true });
 
         if (error) throw error;
 
-        const mapped: Contact[] = (data as ContactReadRow[] || []).map((r) => ({
+        const mapped: Contact[] = ((data as any) || []).map((r: any) => ({
           id: r.contact_id,
           name: r.name || "Unknown",
           title: r.title || undefined,
@@ -377,6 +377,7 @@ const Results = () => {
           linkedin: r.linkedin || undefined,
           phone: r.phone || undefined,
           email_status: r.email_status || undefined,
+          company_id: r.company_id || undefined,
         }));
 
         setContacts(mapped);
@@ -406,19 +407,44 @@ const Results = () => {
   const handleJobSelect = (jobId: string) => setSelectedJobId(jobId);
   const handleContactSelect = (contactId: string) => setSelectedContactId(contactId);
 
-  // Placeholder message generator
-  const handleGenerateMessage = async (_contactId: string, _jobId: string) => {
+  // Message generator using n8n webhook
+  const handleGenerateMessage = async (contactId: string, jobId: string) => {
     setIsGeneratingMessage(true);
     try {
-      await new Promise((r) => setTimeout(r, 1200));
+      const contact = contacts.find(c => c.id === contactId);
+      const job = jobs.find(j => j.id === jobId);
+      
+      const response = await fetch("https://n8n.srv930021.hstgr.cloud/webhook/message/generate", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          contact_id: contactId,
+          job_id: jobId,
+          company_id: contact?.company_id || job?.company_id,
+          channel: "email",
+          tone: "professional",
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(response.statusText);
+      }
+
+      const result = await response.json();
+      
       toast({
         title: "Message generated",
-        description: "AI message has been generated successfully.",
+        description: "AI outreach message has been generated successfully.",
       });
-    } catch {
+
+      // The MessagePanel will be updated to handle the generated message
+      return result;
+    } catch (error: any) {
       toast({
         title: "Generation failed",
-        description: "Failed to generate AI message.",
+        description: error.message || "Failed to generate AI message.",
         variant: "destructive",
       });
     } finally {
