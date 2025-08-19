@@ -568,7 +568,7 @@ const Results = () => {
                     isLoading={isJobsLoading}
                   />
                 </div>
-                <div className="flex-1 overflow-hidden pr-2 pb-4">
+                <div className="flex-1 overflow-hidden px-4 pb-4">
                   <JobsList
                     jobs={jobs}
                     selectedJobId={selectedJobId}
