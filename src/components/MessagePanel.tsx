@@ -15,17 +15,29 @@ interface MessagePanelProps {
   selectedJob: Job | null;
   onGenerateMessage?: (contactId: string, jobId: string) => Promise<any>;
   isGenerating?: boolean;
+  // NEW: a saved draft to prefill when present (subject/body/channel)
+  initialDraft?: {
+    subject?: string | null;
+    body?: string | null;
+    channel?: string | null;
+    preview_text?: string | null;
+    tone?: string | null;
+    template_version?: string | null;
+    variant?: string | null;
+    status?: string | null;
+  } | null;
 }
 
 const MessagePanel = ({
   selectedContact,
   selectedJob,
   onGenerateMessage,
-  isGenerating = false
+  isGenerating = false,
+  initialDraft = null,
 }: MessagePanelProps) => {
   const { toast } = useToast();
 
-  // Start empty; we'll only populate after AI returns content
+  // Subject/body defaults are blank unless initialDraft exists
   const [messageData, setMessageData] = useState({
     subject: "",
     body: "",
@@ -34,17 +46,25 @@ const MessagePanel = ({
 
   const [generatedMessage, setGeneratedMessage] = useState<any>(null);
 
-  // When contact/job changes, clear message fields so the user knows
-  // they must click "Generate Message"
+  // When selection changes, either load the saved draft or clear to blank
   useEffect(() => {
     if (selectedContact && selectedJob) {
-      setMessageData({ subject: "", body: "", channel: "email" });
-      setGeneratedMessage(null);
+      if (initialDraft && (initialDraft.subject || initialDraft.body)) {
+        setMessageData({
+          subject: initialDraft.subject || "",
+          body: initialDraft.body || "",
+          channel: (initialDraft.channel as "email" | "linkedin") || "email",
+        });
+        setGeneratedMessage(initialDraft);
+      } else {
+        setMessageData({ subject: "", body: "", channel: "email" });
+        setGeneratedMessage(null);
+      }
     } else {
       setMessageData({ subject: "", body: "", channel: "email" });
       setGeneratedMessage(null);
     }
-  }, [selectedContact, selectedJob]);
+  }, [selectedContact, selectedJob, initialDraft]);
 
   const handleCopyMessage = () => {
     const fullMessage =
@@ -66,12 +86,9 @@ const MessagePanel = ({
       if (result) {
         setGeneratedMessage(result);
         setMessageData({
-          subject:
-            result.subject ||
-            `Re: ${selectedJob.title} opportunity`,
+          subject: result.subject || "",
           body: result.body || "",
-          // We’re ignoring channel logic overall; default to email if not present
-          channel: result.channel || "email",
+          channel: (result.channel as "email" | "linkedin") || "email",
         });
 
         toast({
@@ -80,7 +97,7 @@ const MessagePanel = ({
         });
       }
     } catch {
-      // Parent likely handles error toasts/logging
+      // Parent shows toast on failure
     }
   };
 
@@ -115,7 +132,7 @@ const MessagePanel = ({
         </CardTitle>
         <div className="text-sm text-muted-foreground">
           To: {selectedContact.name} • {selectedJob.title} at{" "}
-          {"company" in selectedJob ? (selectedJob as any).company : selectedJob.company_name}
+          {"company" in selectedJob ? (selectedJob as any).company : (selectedJob as any).company_name}
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
