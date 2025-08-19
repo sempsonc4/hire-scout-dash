@@ -20,8 +20,8 @@ type JobReadRow = {
   run_id: string | null;
   title: string | null;
   company_name: string | null;
-  company_id: string | null;              // may exist in base view; not always populated
-  company_id_resolved: string | null;     // NEW from v_jobs_read_plus (COALESCE of link/alias/name)
+  company_id: string | null;
+  company_id_resolved: string | null;
   location: string | null;
   salary: string | null;
   posted_at: string | null;
@@ -29,7 +29,7 @@ type JobReadRow = {
   source_type: string | null;
   link: string | null;
   created_at: string | null;
-  contact_count: number | null;           // NEW from v_jobs_read_plus
+  contact_count: number | null;
 };
 
 type ContactReadRow = {
@@ -78,6 +78,9 @@ const Results = () => {
   const [isJobsLoading, setIsJobsLoading] = useState(false);
   const [contactsLoading, setContactsLoading] = useState(false);
   const [isGeneratingMessage, setIsGeneratingMessage] = useState(false);
+
+  // NEW: the current saved draft (if any) for selected job+contact
+  const [initialDraft, setInitialDraft] = useState<any | null>(null);
 
   // Pagination & filters
   const [currentPage, setCurrentPage] = useState(1);
@@ -135,7 +138,6 @@ const Results = () => {
     let q = base;
 
     if (filters.search) {
-      // search in title + company_name
       q = q.or(`title.ilike.%${filters.search}%,company_name.ilike.%${filters.search}%`);
     }
     if (filters.company) {
@@ -177,7 +179,6 @@ const Results = () => {
         }
 
         const query = buildJobViewQuery(base)
-          // Prefer newest by posted_at, fallback to created_at
           .order("posted_at", { ascending: false, nullsFirst: false })
           .order("created_at", { ascending: false })
           .range(offset, offset + JOBS_PER_PAGE - 1);
@@ -194,7 +195,6 @@ const Results = () => {
           id: row.job_id,
           title: row.title || "",
           company: row.company_name || "",
-          // Use resolved id from the view
           company_id: row.company_id_resolved || row.company_id || undefined,
           location: row.location || undefined,
           salary: row.salary || undefined,
@@ -208,7 +208,6 @@ const Results = () => {
         setJobs(mapped);
         setTotalCount(count || 0);
 
-        // Auto-select the first job when none selected
         if (mapped.length > 0 && !selectedJobId) {
           setSelectedJobId(mapped[0].id);
         }
@@ -258,7 +257,6 @@ const Results = () => {
 
     const setup = async () => {
       try {
-        // Fetch initial run row to derive status badge
         const { data: runRow, error } = await supabaseRef.current
           .from("runs")
           .select("*")
@@ -294,13 +292,13 @@ const Results = () => {
         .on(
           "postgres_changes",
           { event: "*", schema: "public", table: "company_jobs" },
-          () => fetchJobs(currentPage) // links affect company_id_resolved & contact_count
+          () => fetchJobs(currentPage)
         )
         .on(
           "postgres_changes",
           { event: "*", schema: "public", table: "contacts" },
           () => {
-            fetchJobs(currentPage); // contact_count may change
+            fetchJobs(currentPage);
             if (selectedJobId) {
               loadContactsForSelectedJob(selectedJobId);
             }
@@ -346,7 +344,7 @@ const Results = () => {
     setCurrentPage(1);
   }, [filters]);
 
-  // Load contacts for a given job (from v_contacts_read) using company_id_resolved
+  // Load contacts for a given job (from v_contacts_read)
   const loadContactsForSelectedJob = useCallback(
     async (jobId: string) => {
       if (!supabaseRef.current) return;
@@ -401,25 +399,50 @@ const Results = () => {
     if (selectedJobId) loadContactsForSelectedJob(selectedJobId);
   }, [selectedJobId, loadContactsForSelectedJob]);
 
+  // NEW: Load existing draft for the selected contact+job
+  useEffect(() => {
+    const fetchDraft = async () => {
+      if (!supabaseRef.current || !selectedContactId || !selectedJobId) {
+        setInitialDraft(null);
+        return;
+      }
+      try {
+        const { data, error } = await supabaseRef.current
+          .from("outreach_messages" as any)
+          .select("message_id, subject, body, preview_text, tone, template_version, variant, channel, status, updated_at")
+          .eq("contact_id", selectedContactId)
+          .eq("job_id", selectedJobId)
+          .eq("status", "draft")
+          .order("updated_at", { ascending: false })
+          .limit(1);
+
+        if (error) throw error;
+        setInitialDraft((data && data.length > 0) ? data[0] : null);
+      } catch (err) {
+        console.error("Error loading existing draft:", err);
+        setInitialDraft(null);
+      }
+    };
+
+    fetchDraft();
+  }, [selectedContactId, selectedJobId]);
+
   // Handlers
   const handlePageChange = (page: number) => setCurrentPage(page);
   const handleFiltersChange = (f: JobFiltersState) => setFilters(f);
   const handleJobSelect = (jobId: string) => setSelectedJobId(jobId);
   const handleContactSelect = (contactId: string) => setSelectedContactId(contactId);
 
-  // Message generator using n8n webhook
+  // Message generator using n8n webhook (unchanged)
   const handleGenerateMessage = async (contactId: string, jobId: string) => {
     setIsGeneratingMessage(true);
     try {
       const contact = contacts.find(c => c.id === contactId);
       const job = jobs.find(j => j.id === jobId);
-      
-      // Step 1: Call webhook to generate message
+
       const response = await fetch("https://n8n.srv930021.hstgr.cloud/webhook/message/generate", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contact_id: contactId,
           job_id: jobId,
@@ -429,31 +452,22 @@ const Results = () => {
         }),
       });
 
-      if (!response.ok) {
-        throw new Error(response.statusText);
-      }
-
+      if (!response.ok) throw new Error(response.statusText);
       const webhookResult = await response.json();
-      
-      if (!webhookResult.ok || !webhookResult.message_id) {
-        throw new Error("Invalid webhook response");
-      }
+      if (!webhookResult.ok || !webhookResult.message_id) throw new Error("Invalid webhook response");
 
-      // Step 2: Fetch the generated message from Supabase
       const { data: messageData, error } = await supabaseRef.current!
         .from('outreach_messages' as any)
         .select('message_id, contact_id, job_id, company_id, subject, body, preview_text, tone, template_version, variant, status, updated_at')
         .eq('message_id', webhookResult.message_id)
         .single();
 
-      if (error) {
-        throw new Error(`Failed to fetch message: ${error.message}`);
-      }
+      if (error) throw new Error(`Failed to fetch message: ${error.message}`);
+      if (!messageData) throw new Error("Generated message not found");
 
-      if (!messageData) {
-        throw new Error("Generated message not found");
-      }
-      
+      // Optional: refresh initialDraft to reflect latest saved version
+      setInitialDraft(messageData);
+
       toast({
         title: "Message generated",
         description: "AI outreach message has been generated successfully.",
@@ -544,7 +558,7 @@ const Results = () => {
               <CardContent className="flex-1 flex flex-col space-y-4">
                 <JobFilters
                   filters={filters}
-                  onFiltersChange={handleFiltersChange}
+                  onFiltersChange={setFilters}
                   companySuggestions={companySuggestions}
                   sourceSuggestions={sourceSuggestions}
                   isLoading={isJobsLoading}
@@ -553,11 +567,11 @@ const Results = () => {
                   <JobsList
                     jobs={jobs}
                     selectedJobId={selectedJobId}
-                    onJobSelect={handleJobSelect}
+                    onJobSelect={setSelectedJobId}
                     isLoading={isJobsLoading}
                     currentPage={currentPage}
                     totalPages={totalPages}
-                    onPageChange={handlePageChange}
+                    onPageChange={setCurrentPage}
                     totalCount={totalCount}
                   />
                 </div>
@@ -570,7 +584,7 @@ const Results = () => {
             <ContactsList
               contacts={contacts}
               selectedContactId={selectedContactId}
-              onContactSelect={handleContactSelect}
+              onContactSelect={setSelectedContactId}
               isLoading={contactsLoading}
               companyName={selectedJob?.company}
             />
@@ -583,6 +597,7 @@ const Results = () => {
               selectedJob={selectedJob}
               onGenerateMessage={handleGenerateMessage}
               isGenerating={isGeneratingMessage}
+              initialDraft={initialDraft}  // <-- NEW
             />
           </div>
         </div>
