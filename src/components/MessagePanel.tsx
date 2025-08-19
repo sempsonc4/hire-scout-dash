@@ -1,18 +1,11 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { 
-  MessageSquare, 
-  Copy, 
-  RefreshCw, 
-  Wand2, 
-  Loader2,
-  CheckCircle 
-} from "lucide-react";
+import { MessageSquare, Copy, Wand2, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import type { Contact } from "./ContactsList";
 import type { Job } from "./JobsList";
@@ -31,39 +24,33 @@ const MessagePanel = ({
   isGenerating = false
 }: MessagePanelProps) => {
   const { toast } = useToast();
+
+  // Start empty; we'll only populate after AI returns content
   const [messageData, setMessageData] = useState({
     subject: "",
     body: "",
-    channel: "email" as "email" | "linkedin"
+    channel: "email" as "email" | "linkedin",
   });
+
   const [generatedMessage, setGeneratedMessage] = useState<any>(null);
 
-  // Generate placeholder message when contact/job changes
-  React.useEffect(() => {
+  // When contact/job changes, clear message fields so the user knows
+  // they must click "Generate Message"
+  useEffect(() => {
     if (selectedContact && selectedJob) {
-      const firstName = selectedContact.name.split(' ')[0];
-      setMessageData({
-        subject: `Exploring opportunities at ${selectedJob.company}`,
-        body: `Hi ${firstName},
-
-I hope this message finds you well. I came across the ${selectedJob.title} role at ${selectedJob.company} and was immediately drawn to your team's work.
-
-With my background and passion for the field, I believe I could contribute significantly to your continued success.
-
-Would you be available for a brief conversation about this opportunity?
-
-Best regards`,
-        channel: "email"
-      });
+      setMessageData({ subject: "", body: "", channel: "email" });
+      setGeneratedMessage(null);
     } else {
       setMessageData({ subject: "", body: "", channel: "email" });
+      setGeneratedMessage(null);
     }
   }, [selectedContact, selectedJob]);
 
   const handleCopyMessage = () => {
-    const fullMessage = messageData.channel === "email" 
-      ? `Subject: ${messageData.subject}\n\n${messageData.body}`
-      : messageData.body;
+    const fullMessage =
+      messageData.channel === "email"
+        ? `Subject: ${messageData.subject}\n\n${messageData.body}`
+        : messageData.body;
     navigator.clipboard.writeText(fullMessage);
     toast({
       title: "Message copied",
@@ -72,32 +59,29 @@ Best regards`,
   };
 
   const handleGenerateMessage = async () => {
-    if (!selectedContact || !selectedJob || !onGenerateMessage) {
-      return;
-    }
+    if (!selectedContact || !selectedJob || !onGenerateMessage) return;
 
     try {
       const result = await onGenerateMessage(selectedContact.id, selectedJob.id);
       if (result) {
         setGeneratedMessage(result);
         setMessageData({
-          subject: result.subject || `Re: ${selectedJob.title} opportunity at ${selectedJob.company}`,
+          subject:
+            result.subject ||
+            `Re: ${selectedJob.title} opportunity`,
           body: result.body || "",
-          channel: result.channel || "email"
+          // We’re ignoring channel logic overall; default to email if not present
+          channel: result.channel || "email",
         });
-        
+
         toast({
           title: "Message generated",
-          description: `AI ${result.channel || 'email'} message generated successfully.`,
+          description: "AI message generated successfully.",
         });
       }
-    } catch (error) {
-      // Error handling is already done in the parent component
+    } catch {
+      // Parent likely handles error toasts/logging
     }
-  };
-
-  const handleRegenerateMessage = () => {
-    handleGenerateMessage();
   };
 
   if (!selectedContact || !selectedJob) {
@@ -130,7 +114,8 @@ Best regards`,
           AI Message
         </CardTitle>
         <div className="text-sm text-muted-foreground">
-          To: {selectedContact.name} • {selectedJob.title} at {selectedJob.company}
+          To: {selectedContact.name} • {selectedJob.title} at{" "}
+          {"company" in selectedJob ? (selectedJob as any).company : selectedJob.company_name}
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -145,7 +130,7 @@ Best regards`,
           ) : (
             <Wand2 className="w-4 h-4 mr-2" />
           )}
-          {isGenerating ? "Generating..." : "Generate Outreach"}
+          {isGenerating ? "Generating..." : "Generate Message"}
         </Button>
 
         <Separator />
@@ -157,7 +142,9 @@ Best regards`,
             <Input
               id="subject"
               value={messageData.subject}
-              onChange={(e) => setMessageData(prev => ({ ...prev, subject: e.target.value }))}
+              onChange={(e) =>
+                setMessageData((prev) => ({ ...prev, subject: e.target.value }))
+              }
               placeholder="Email subject line"
             />
           </div>
@@ -165,11 +152,15 @@ Best regards`,
 
         {/* Message Body */}
         <div className="space-y-2">
-          <Label htmlFor="message">{messageData.channel === "email" ? "Message" : "LinkedIn Message"}</Label>
+          <Label htmlFor="message">
+            {messageData.channel === "email" ? "Message" : "LinkedIn Message"}
+          </Label>
           <Textarea
             id="message"
             value={messageData.body}
-            onChange={(e) => setMessageData(prev => ({ ...prev, body: e.target.value }))}
+            onChange={(e) =>
+              setMessageData((prev) => ({ ...prev, body: e.target.value }))
+            }
             placeholder={`Your personalized ${messageData.channel} message will appear here...`}
             className="min-h-[300px] resize-none"
           />
@@ -186,16 +177,6 @@ Best regards`,
             <Copy className="w-4 h-4 mr-2" />
             Copy
           </Button>
-          
-          <Button
-            variant="outline"
-            onClick={handleRegenerateMessage}
-            disabled={isGenerating}
-            className="flex-1"
-          >
-            <RefreshCw className="w-4 h-4 mr-2" />
-            Regenerate
-          </Button>
         </div>
 
         {/* Generated Message Metadata */}
@@ -203,9 +184,7 @@ Best regards`,
           <div className="pt-4 border-t">
             <div className="text-xs text-muted-foreground space-y-1">
               <div className="font-medium">Message Details:</div>
-              {generatedMessage.tone && (
-                <div>Tone: {generatedMessage.tone}</div>
-              )}
+              {generatedMessage.tone && <div>Tone: {generatedMessage.tone}</div>}
               {generatedMessage.status && (
                 <div>Status: {generatedMessage.status}</div>
               )}
@@ -220,15 +199,9 @@ Best regards`,
         <div className="pt-4 border-t">
           <div className="text-sm text-muted-foreground space-y-1">
             <div className="font-medium">Contact Information:</div>
-            {selectedContact.email && (
-              <div>Email: {selectedContact.email}</div>
-            )}
-            {selectedContact.linkedin && (
-              <div>LinkedIn: Available</div>
-            )}
-            {selectedContact.title && (
-              <div>Title: {selectedContact.title}</div>
-            )}
+            {selectedContact.email && <div>Email: {selectedContact.email}</div>}
+            {selectedContact.linkedin && <div>LinkedIn: Available</div>}
+            {selectedContact.title && <div>Title: {selectedContact.title}</div>}
           </div>
         </div>
       </CardContent>
