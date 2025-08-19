@@ -598,7 +598,7 @@ const Results = () => {
           </div>
 
           {/* Message Column */}
-          <div className="lg:col-span-3 flex flex-col">
+          <div className="lg:col-span-4 flex flex-col">
             <div className="flex-1 overflow-hidden">
               <MessagePanel
                 selectedContact={selectedContact}
