@@ -164,15 +164,9 @@ const Home = () => {
       </header>
 
       {/* Main Content */}
-      <main className="container mx-auto px-4 py-16">
-        <div className="max-w-2xl mx-auto text-center mb-12">
-          <h2 className="text-4xl font-bold text-foreground mb-4">Find Your Next Opportunity</h2>
-          <p className="text-lg text-muted-foreground">
-            Search for jobs, discover contacts, and craft personalized outreach messages with AI assistance.
-          </p>
-        </div>
+      <main className="container mx-auto px-4 py-12">
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 max-w-5xl mx-auto">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 max-w-6xl mx-auto mb-8">
           {/* Role-based Search */}
           <Card className="shadow-professional-lg">
             <CardHeader>
@@ -276,17 +270,17 @@ const Home = () => {
         </div>
 
         {/* Browse All Jobs */}
-        <div className="max-w-2xl mx-auto mt-8">
-          <Card className="text-center shadow-professional-md">
-            <CardContent className="pt-6">
-              <div className="w-12 h-12 bg-muted rounded-lg flex items-center justify-center mx-auto mb-4">
-                <List className="w-6 h-6 text-muted-foreground" />
+        <div className="max-w-4xl mx-auto">
+          <Card className="text-center shadow-professional-lg border-2 border-dashed">
+            <CardContent className="py-8">
+              <div className="w-16 h-16 bg-gradient-secondary rounded-xl flex items-center justify-center mx-auto mb-6">
+                <List className="w-8 h-8 text-secondary-foreground" />
               </div>
-              <h3 className="font-semibold mb-2">Browse All Jobs</h3>
-              <p className="text-sm text-muted-foreground mb-4">
-                Explore all available positions in our database with advanced filtering options.
+              <h3 className="text-xl font-semibold mb-3">Browse All Jobs</h3>
+              <p className="text-muted-foreground mb-6 max-w-md mx-auto">
+                Explore all available positions in our database with advanced filtering options and real-time updates.
               </p>
-              <Button onClick={handleBrowseAll} variant="outline" size="lg">
+              <Button onClick={handleBrowseAll} size="lg" className="px-8">
                 <List className="w-5 h-5 mr-2" />
                 View All Jobs
               </Button>
@@ -294,38 +288,6 @@ const Home = () => {
           </Card>
         </div>
 
-        {/* Features Preview */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-16 max-w-4xl mx-auto">
-          <Card className="text-center">
-            <CardContent className="pt-6">
-              <div className="w-12 h-12 bg-primary/10 rounded-lg flex items-center justify-center mx-auto mb-4">
-                <Search className="w-6 h-6 text-primary" />
-              </div>
-              <h3 className="font-semibold mb-2">Smart Job Discovery</h3>
-              <p className="text-sm text-muted-foreground">Find relevant opportunities from multiple sources with intelligent filtering.</p>
-            </CardContent>
-          </Card>
-
-          <Card className="text-center">
-            <CardContent className="pt-6">
-              <div className="w-12 h-12 bg-accent/10 rounded-lg flex items-center justify-center mx-auto mb-4">
-                <Target className="w-6 h-6 text-accent" />
-              </div>
-              <h3 className="font-semibold mb-2">Contact Discovery</h3>
-              <p className="text-sm text-muted-foreground">Identify key decision makers and get verified contact information.</p>
-            </CardContent>
-          </Card>
-
-          <Card className="text-center">
-            <CardContent className="pt-6">
-              <div className="w-12 h-12 bg-warning/10 rounded-lg flex items-center justify-center mx-auto mb-4">
-                <div className="w-6 h-6 text-warning font-bold">AI</div>
-              </div>
-              <h3 className="font-semibold mb-2">AI Outreach</h3>
-              <p className="text-sm text-muted-foreground">Generate personalized messages tailored to each contact and role.</p>
-            </CardContent>
-          </Card>
-        </div>
       </main>
     </div>
   );

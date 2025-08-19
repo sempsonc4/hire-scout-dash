@@ -44,26 +44,11 @@ const ContactsList = ({
   const getVerificationBadge = (status?: string) => {
     switch (status) {
       case "verified":
-        return (
-          <Badge variant="secondary" className="bg-verified/10 text-verified border-verified/20">
-            <CheckCircle className="w-3 h-3 mr-1" />
-            Verified
-          </Badge>
-        );
+        return <CheckCircle className="w-4 h-4 text-green-600" />;
       case "unverified":
-        return (
-          <Badge variant="secondary" className="bg-unverified/10 text-unverified border-unverified/20">
-            <XCircle className="w-3 h-3 mr-1" />
-            Unverified
-          </Badge>
-        );
+        return <XCircle className="w-4 h-4 text-red-500" />;
       case "pending":
-        return (
-          <Badge variant="secondary" className="bg-warning/10 text-warning border-warning/20">
-            <AlertCircle className="w-3 h-3 mr-1" />
-            Pending
-          </Badge>
-        );
+        return <AlertCircle className="w-4 h-4 text-amber-500" />;
       default:
         return null;
     }
@@ -149,21 +134,17 @@ const ContactsList = ({
                       )}
 
                       {contact.linkedin && (
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2 text-sm">
-                            <Linkedin className="w-4 h-4 text-muted-foreground" />
-                            <span className="truncate">LinkedIn Profile</span>
-                          </div>
+                        <div className="flex items-center gap-2 text-sm">
+                          <Linkedin className="w-4 h-4 text-muted-foreground" />
                           <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-6 px-2 text-xs"
+                            variant="link"
+                            className="h-auto p-0 text-sm text-blue-600 hover:text-blue-700 font-normal"
                             onClick={(e) => {
                               e.stopPropagation();
                               window.open(contact.linkedin, '_blank', 'noopener,noreferrer');
                             }}
                           >
-                            <ExternalLink className="w-3 h-3" />
+                            LinkedIn Profile
                           </Button>
                         </div>
                       )}

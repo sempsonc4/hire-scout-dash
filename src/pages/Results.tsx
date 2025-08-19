@@ -3,7 +3,7 @@ import { useSearchParams, useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { ArrowLeft, Target, RefreshCw, Loader2 } from "lucide-react";
+import { ArrowLeft, Target, RefreshCw, Loader2, Building2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { createJWTClient } from "@/lib/supabaseClient";
@@ -551,19 +551,24 @@ const Results = () => {
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-[calc(100vh-12rem)]">
           {/* Jobs Column */}
           <div className="lg:col-span-4 flex flex-col">
-            <Card className="flex-1 flex flex-col">
-              <CardHeader className="pb-4">
-                <CardTitle>Jobs</CardTitle>
+            <Card className="flex-1 flex flex-col shadow-professional-md">
+              <CardHeader className="pb-4 border-b bg-muted/20">
+                <CardTitle className="flex items-center gap-2">
+                  <Building2 className="w-5 h-5 text-primary" />
+                  Jobs
+                </CardTitle>
               </CardHeader>
-              <CardContent className="flex-1 flex flex-col space-y-4">
-                <JobFilters
-                  filters={filters}
-                  onFiltersChange={setFilters}
-                  companySuggestions={companySuggestions}
-                  sourceSuggestions={sourceSuggestions}
-                  isLoading={isJobsLoading}
-                />
-                <div className="flex-1">
+              <CardContent className="flex-1 flex flex-col space-y-4 p-0">
+                <div className="p-4 border-b">
+                  <JobFilters
+                    filters={filters}
+                    onFiltersChange={setFilters}
+                    companySuggestions={companySuggestions}
+                    sourceSuggestions={sourceSuggestions}
+                    isLoading={isJobsLoading}
+                  />
+                </div>
+                <div className="flex-1 overflow-hidden px-4 pb-4">
                   <JobsList
                     jobs={jobs}
                     selectedJobId={selectedJobId}
@@ -580,25 +585,29 @@ const Results = () => {
           </div>
 
           {/* Contacts Column */}
-          <div className="lg:col-span-4">
-            <ContactsList
-              contacts={contacts}
-              selectedContactId={selectedContactId}
-              onContactSelect={setSelectedContactId}
-              isLoading={contactsLoading}
-              companyName={selectedJob?.company}
-            />
+          <div className="lg:col-span-4 flex flex-col">
+            <div className="flex-1 overflow-hidden">
+              <ContactsList
+                contacts={contacts}
+                selectedContactId={selectedContactId}
+                onContactSelect={setSelectedContactId}
+                isLoading={contactsLoading}
+                companyName={selectedJob?.company}
+              />
+            </div>
           </div>
 
           {/* Message Column */}
-          <div className="lg:col-span-4">
-            <MessagePanel
-              selectedContact={selectedContact}
-              selectedJob={selectedJob}
-              onGenerateMessage={handleGenerateMessage}
-              isGenerating={isGeneratingMessage}
-              initialDraft={initialDraft}  // <-- NEW
-            />
+          <div className="lg:col-span-4 flex flex-col">
+            <div className="flex-1 overflow-hidden">
+              <MessagePanel
+                selectedContact={selectedContact}
+                selectedJob={selectedJob}
+                onGenerateMessage={handleGenerateMessage}
+                isGenerating={isGeneratingMessage}
+                initialDraft={initialDraft}
+              />
+            </div>
           </div>
         </div>
       </main>
