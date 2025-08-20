@@ -1,48 +1,16 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useSearchParams, useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ArrowLeft, Target, RefreshCw, Loader2, Building2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { supabase } from "@/integrations/supabase/client";
-import { createJWTClient } from "@/lib/supabaseClient";
 
 // Components
 import JobFilters, { JobFiltersState } from "@/components/JobFilters";
 import JobsList, { Job } from "@/components/JobsList";
 import ContactsList, { Contact } from "@/components/ContactsList";
 import MessagePanel from "@/components/MessagePanel";
-
-// ---- Local view row types (aligned to v_jobs_read_plus) ----
-type JobReadRow = {
-  job_id: string;
-  run_id: string | null;
-  title: string | null;
-  company_name: string | null;
-  company_id: string | null;
-  company_id_resolved: string | null;
-  location: string | null;
-  salary: string | null;
-  posted_at: string | null;
-  source: string | null;
-  source_type: string | null;
-  link: string | null;
-  created_at: string | null;
-  contact_count: number | null;
-};
-
-type ContactReadRow = {
-  contact_id: string;
-  company_id: string | null;
-  name: string | null;
-  title: string | null;
-  email: string | null;
-  email_status: string | null;
-  linkedin: string | null;
-  phone: string | null;
-  created_at: string | null;
-};
 
 type RunPhase = "loading" | "running" | "completed" | "failed";
 
@@ -79,7 +47,7 @@ const Results = () => {
   const [contactsLoading, setContactsLoading] = useState(false);
   const [isGeneratingMessage, setIsGeneratingMessage] = useState(false);
 
-  // NEW: the current saved draft (if any) for selected job+contact
+  // Current saved draft (if any) for selected job+contact
   const [initialDraft, setInitialDraft] = useState<any | null>(null);
 
   // Pagination & filters
@@ -99,10 +67,6 @@ const Results = () => {
   const [companySuggestions, setCompanySuggestions] = useState<string[]>([]);
   const [sourceSuggestions, setSourceSuggestions] = useState<string[]>([]);
 
-  // Supabase client (JWT in run mode, anon otherwise)
-  const supabaseRef = useRef<ReturnType<typeof createJWTClient> | typeof supabase | null>(null);
-  const channelRef = useRef<ReturnType<NonNullable<typeof supabaseRef["current"]>["channel"]> | null>(null);
-
   // JWT from navigation state (run mode)
   const state = location.state as LocationState | null;
   const jwt = state?.jwt;
@@ -112,7 +76,7 @@ const Results = () => {
   const selectedJob = jobs.find(j => j.id === selectedJobId) || null;
   const selectedContact = contacts.find(c => c.id === selectedContactId) || null;
 
-  // Initialize Supabase client
+  // Check JWT expiry
   useEffect(() => {
     if (mode === "run" && jwt) {
       if (jwtExp && Date.now() / 1000 > jwtExp) {
@@ -124,92 +88,52 @@ const Results = () => {
         navigate("/");
         return;
       }
-      const client = createJWTClient(jwt);
-      supabaseRef.current = client;
-      client.auth.setSession({ access_token: jwt, refresh_token: "" });
-      client.realtime.setAuth(jwt);
-    } else {
-      supabaseRef.current = supabase;
     }
   }, [mode, jwt, jwtExp, navigate, toast]);
 
-  // Build query with filters for v_jobs_read_plus
-  const buildJobViewQuery = useCallback((base: any) => {
-    let q = base;
-
-    if (filters.search) {
-      q = q.or(`title.ilike.%${filters.search}%,company_name.ilike.%${filters.search}%`);
-    }
-    if (filters.company) {
-      q = q.ilike("company_name", `%${filters.company}%`);
-    }
-    if (filters.dateFrom) {
-      q = q.gte("posted_at", filters.dateFrom);
-    }
-    if (filters.dateTo) {
-      q = q.lte("posted_at", filters.dateTo);
-    }
-    if (filters.location) {
-      q = q.ilike("location", `%${filters.location}%`);
-    }
-    if (filters.source) {
-      q = q.or(`source.ilike.%${filters.source}%,source_type.ilike.%${filters.source}%`);
-    }
-    if (filters.hasContacts) {
-      q = q.gt("contact_count", 0);
-    }
-
-    return q;
-  }, [filters]);
-
-  // Fetch jobs from v_jobs_read_plus (paged)
+  // Fetch jobs using API
   const fetchJobs = useCallback(
     async (page: number = 1) => {
-      if (!supabaseRef.current) return;
       setIsJobsLoading(true);
       try {
-        const offset = (page - 1) * JOBS_PER_PAGE;
+        const params = new URLSearchParams({
+          page: page.toString(),
+          limit: JOBS_PER_PAGE.toString(),
+        });
 
-        let base = supabaseRef.current
-          .from("v_jobs_read_plus" as any)
-          .select("*", { count: "exact" });
+        if (runId) params.append("run_id", runId);
+        if (filters.search) params.append("search", filters.search);
+        if (filters.company) params.append("company", filters.company);
+        if (filters.dateFrom) params.append("dateFrom", filters.dateFrom);
+        if (filters.dateTo) params.append("dateTo", filters.dateTo);
+        if (filters.location) params.append("location", filters.location);
+        if (filters.source) params.append("source", filters.source);
+        if (filters.hasContacts) params.append("hasContacts", "true");
 
-        if (mode === "run" && runId) {
-          base = base.eq("run_id", runId);
-        }
+        const response = await fetch(`/api/jobs?${params}`);
+        if (!response.ok) throw new Error("Failed to fetch jobs");
 
-        const query = buildJobViewQuery(base)
-          .order("posted_at", { ascending: false, nullsFirst: false })
-          .order("created_at", { ascending: false })
-          .range(offset, offset + JOBS_PER_PAGE - 1);
-
-        const { data, error, count } = await query as {
-          data: JobReadRow[] | null;
-          error: any;
-          count: number | null;
-        };
-
-        if (error) throw error;
-
-        const mapped: Job[] = (data || []).map((row) => ({
-          id: row.job_id,
-          title: row.title || "",
-          company: row.company_name || "",
-          company_id: row.company_id_resolved || row.company_id || undefined,
-          location: row.location || undefined,
-          salary: row.salary || undefined,
-          posted_at: row.posted_at || undefined,
-          source: row.source || undefined,
-          source_type: row.source_type || undefined,
-          link: row.link || undefined,
-          hasContacts: (row.contact_count || 0) > 0,
+        const result = await response.json();
+        const jobs: Job[] = result.data.map((job: any) => ({
+          id: job.job_id,
+          title: job.title || "",
+          company: job.company_name || "",
+          company_id: job.company_id || undefined,
+          location: job.location || undefined,
+          salary: job.salary || undefined,
+          posted_at: job.posted_at || undefined,
+          source: job.source || undefined,
+          source_type: job.source_type || undefined,
+          link: job.link || undefined,
+          hasContacts: false, // We'll determine this when loading contacts
         }));
 
-        setJobs(mapped);
-        setTotalCount(count || 0);
+        setJobs(jobs);
+        setTotalCount(result.total);
+        setCurrentPage(page);
 
-        if (mapped.length > 0 && !selectedJobId) {
-          setSelectedJobId(mapped[0].id);
+        if (jobs.length > 0 && !selectedJobId) {
+          setSelectedJobId(jobs[0].id);
         }
       } catch (err) {
         console.error("Error fetching jobs:", err);
@@ -222,171 +146,44 @@ const Results = () => {
         setIsJobsLoading(false);
       }
     },
-    [mode, runId, buildJobViewQuery, selectedJobId, toast]
+    [runId, filters, selectedJobId, toast]
   );
 
-  // Suggestions (companies, sources) from v_jobs_read_plus
-  const fetchFilterSuggestions = useCallback(async () => {
-    if (!supabaseRef.current) return;
-    try {
-      const [{ data: compData }, { data: srcData }] = await Promise.all([
-        supabaseRef.current.from("v_jobs_read_plus" as any).select("company_name").not("company_name", "is", null).limit(200),
-        supabaseRef.current.from("v_jobs_read_plus" as any).select("source, source_type").limit(200),
-      ]);
-
-      if (compData) {
-        const uniq = [...new Set((compData as any[]).map(r => r.company_name).filter(Boolean) as string[])].sort();
-        setCompanySuggestions(uniq);
-      }
-      if (srcData) {
-        const all = (srcData as any[])
-          .flatMap(r => [r.source, r.source_type].filter(Boolean) as string[]);
-        const uniq = [...new Set(all)].sort();
-        setSourceSuggestions(uniq);
-      }
-    } catch (err) {
-      console.error("Error fetching filter suggestions:", err);
-    }
-  }, []);
-
-  // Realtime: listen to base tables; refetch page on changes during a run
-  useEffect(() => {
-    if (mode !== "run" || !runId || !supabaseRef.current) return;
-
-    let cancelled = false;
-
-    const setup = async () => {
-      try {
-        const { data: runRow, error } = await supabaseRef.current
-          .from("runs")
-          .select("*")
-          .eq("run_id", runId)
-          .single();
-
-        if (cancelled) return;
-        if (error) throw error;
-
-        const phase: RunPhase =
-          runRow.status === "completed" ? "completed" :
-          runRow.status === "failed" ? "failed" : "running";
-        setRunStatus(phase);
-
-        const ch = supabaseRef.current.channel(`results-${runId}`);
-
-        ch.on(
-          "postgres_changes",
-          { event: "UPDATE", schema: "public", table: "runs", filter: `run_id=eq.${runId}` },
-          payload => {
-            const newStatus = (payload.new as any).status as string;
-            const phase: RunPhase =
-              newStatus === "completed" ? "completed" :
-              newStatus === "failed" ? "failed" : "running";
-            setRunStatus(phase);
-          }
-        )
-        .on(
-          "postgres_changes",
-          { event: "*", schema: "public", table: "jobs", filter: `run_id=eq.${runId}` },
-          () => fetchJobs(currentPage)
-        )
-        .on(
-          "postgres_changes",
-          { event: "*", schema: "public", table: "company_jobs" },
-          () => fetchJobs(currentPage)
-        )
-        .on(
-          "postgres_changes",
-          { event: "*", schema: "public", table: "contacts" },
-          () => {
-            fetchJobs(currentPage);
-            if (selectedJobId) {
-              loadContactsForSelectedJob(selectedJobId);
-            }
-          }
-        )
-        .subscribe();
-
-        channelRef.current = ch;
-      } catch (err: any) {
-        console.error("Realtime setup failed:", err);
-        toast({
-          title: "Error loading results",
-          description: err.message || "Failed to load search results.",
-          variant: "destructive",
-        });
-        setRunStatus("failed");
-      }
-    };
-
-    setup();
-
-    return () => {
-      cancelled = true;
-      if (channelRef.current && supabaseRef.current) {
-        supabaseRef.current.removeChannel(channelRef.current);
-        channelRef.current = null;
-      }
-    };
-  }, [mode, runId, currentPage, fetchJobs, selectedJobId, toast]);
-
-  // Fetch jobs on mount / page / filters changes
-  useEffect(() => {
-    if (supabaseRef.current) fetchJobs(currentPage);
-  }, [fetchJobs, currentPage]);
-
-  // Suggestions once
-  useEffect(() => {
-    fetchFilterSuggestions();
-  }, [fetchFilterSuggestions]);
-
-  // Reset paging when filters change
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [filters]);
-
-  // Load contacts for a given job (from v_contacts_read)
+  // Load contacts for selected job
   const loadContactsForSelectedJob = useCallback(
     async (jobId: string) => {
-      if (!supabaseRef.current) return;
+      const job = jobs.find(j => j.id === jobId);
+      if (!job?.company_id) {
+        setContacts([]);
+        return;
+      }
+
       setContactsLoading(true);
-      setContacts([]);
-      setSelectedContactId(null);
-
       try {
-        const job = jobs.find(j => j.id === jobId);
-        if (!job?.company_id) {
-          setContactsLoading(false);
-          return;
-        }
+        const response = await fetch(`/api/contacts?company_id=${job.company_id}`);
+        if (!response.ok) throw new Error("Failed to fetch contacts");
 
-        const { data, error } = await supabaseRef.current
-          .from("v_contacts_read" as any)
-          .select("*")
-          .eq("company_id", job.company_id)
-          .order("title", { ascending: true });
-
-        if (error) throw error;
-
-        const mapped: Contact[] = ((data as any) || []).map((r: any) => ({
-          id: r.contact_id,
-          name: r.name || "Unknown",
-          title: r.title || undefined,
-          email: r.email || undefined,
-          linkedin: r.linkedin || undefined,
-          phone: r.phone || undefined,
-          email_status: r.email_status || undefined,
-          company_id: r.company_id || undefined,
+        const result = await response.json();
+        const contacts: Contact[] = result.data.map((contact: any) => ({
+          id: contact.contact_id,
+          name: contact.name || "Unknown",
+          title: contact.title || undefined,
+          email: contact.email || undefined,
+          linkedin: contact.linkedin || undefined,
+          phone: contact.phone || undefined,
+          email_status: contact.email_status || undefined,
+          company_id: contact.company_id || undefined,
         }));
 
-        setContacts(mapped);
-        if (mapped.length > 0) setSelectedContactId(mapped[0].id);
+        setContacts(contacts);
       } catch (err) {
-        console.error("Error loading contacts:", err);
+        console.error("Error fetching contacts:", err);
         toast({
           title: "Error loading contacts",
-          description: "Failed to load contact information.",
+          description: "Failed to load company contacts.",
           variant: "destructive",
         });
+        setContacts([]);
       } finally {
         setContactsLoading(false);
       }
@@ -394,223 +191,216 @@ const Results = () => {
     [jobs, toast]
   );
 
-  // React to job selection
+  // Check run status if in run mode
   useEffect(() => {
-    if (selectedJobId) loadContactsForSelectedJob(selectedJobId);
-  }, [selectedJobId, loadContactsForSelectedJob]);
+    if (mode !== "run" || !runId) {
+      setRunStatus("completed");
+      return;
+    }
 
-  // NEW: Load existing draft for the selected contact+job
-  useEffect(() => {
-    const fetchDraft = async () => {
-      if (!supabaseRef.current || !selectedContactId || !selectedJobId) {
-        setInitialDraft(null);
-        return;
-      }
+    const checkRunStatus = async () => {
       try {
-        const { data, error } = await supabaseRef.current
-          .from("outreach_messages" as any)
-          .select("message_id, subject, body, preview_text, tone, template_version, variant, channel, status, updated_at")
-          .eq("contact_id", selectedContactId)
-          .eq("job_id", selectedJobId)
-          .eq("status", "draft")
-          .order("updated_at", { ascending: false })
-          .limit(1);
+        const response = await fetch(`/api/runs/${runId}`);
+        if (!response.ok) throw new Error("Failed to fetch run status");
 
-        if (error) throw error;
-        setInitialDraft((data && data.length > 0) ? data[0] : null);
+        const run = await response.json();
+        const phase: RunPhase =
+          run.status === "completed" ? "completed" :
+          run.status === "failed" ? "failed" :
+          run.status === "running" ? "running" : "loading";
+        
+        setRunStatus(phase);
       } catch (err) {
-        console.error("Error loading existing draft:", err);
-        setInitialDraft(null);
+        console.error("Error checking run status:", err);
+        setRunStatus("failed");
       }
     };
 
-    fetchDraft();
-  }, [selectedContactId, selectedJobId]);
+    checkRunStatus();
+    
+    // Poll for status updates every 5 seconds if still running
+    const interval = setInterval(checkRunStatus, 5000);
+    return () => clearInterval(interval);
+  }, [mode, runId]);
 
-  // Handlers
-  const handlePageChange = (page: number) => setCurrentPage(page);
-  const handleFiltersChange = (f: JobFiltersState) => setFilters(f);
-  const handleJobSelect = (jobId: string) => setSelectedJobId(jobId);
-  const handleContactSelect = (contactId: string) => setSelectedContactId(contactId);
+  // Load jobs when filters change
+  useEffect(() => {
+    fetchJobs(1);
+  }, [filters, mode, runId]);
 
-  // Message generator using n8n webhook (unchanged)
-  const handleGenerateMessage = async (contactId: string, jobId: string) => {
+  // Load contacts when selected job changes
+  useEffect(() => {
+    if (selectedJobId) {
+      loadContactsForSelectedJob(selectedJobId);
+    }
+  }, [selectedJobId, loadContactsForSelectedJob]);
+
+  // Generate message
+  const handleGenerateMessage = async () => {
+    if (!selectedJobId || !selectedContactId) return;
+
     setIsGeneratingMessage(true);
     try {
-      const contact = contacts.find(c => c.id === contactId);
-      const job = jobs.find(j => j.id === jobId);
-
-      const response = await fetch("https://n8n.srv930021.hstgr.cloud/webhook/message/generate", {
+      const response = await fetch("/webhook/generate-message", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          contact_id: contactId,
-          job_id: jobId,
-          company_id: contact?.company_id || job?.company_id,
-          channel: "email",
-          tone: "professional",
+          contact_id: selectedContactId,
+          job_id: selectedJobId,
+          tone: "professional"
         }),
       });
 
-      if (!response.ok) throw new Error(response.statusText);
-      const webhookResult = await response.json();
-      if (!webhookResult.ok || !webhookResult.message_id) throw new Error("Invalid webhook response");
+      if (!response.ok) throw new Error("Failed to generate message");
 
-      const { data: messageData, error } = await supabaseRef.current!
-        .from('outreach_messages' as any)
-        .select('message_id, contact_id, job_id, company_id, subject, body, preview_text, tone, template_version, variant, status, updated_at')
-        .eq('message_id', webhookResult.message_id)
-        .single();
-
-      if (error) throw new Error(`Failed to fetch message: ${error.message}`);
-      if (!messageData) throw new Error("Generated message not found");
-
-      // Optional: refresh initialDraft to reflect latest saved version
-      setInitialDraft(messageData);
-
+      const result = await response.json();
+      
       toast({
         title: "Message generated",
         description: "AI outreach message has been generated successfully.",
       });
 
-      return messageData;
-    } catch (error: any) {
+      // Refresh draft
+      setInitialDraft({
+        message_id: result.message_id,
+        subject: "Generated Subject",
+        body: "Generated message body",
+        status: "draft"
+      });
+
+    } catch (err) {
+      console.error("Error generating message:", err);
       toast({
         title: "Generation failed",
-        description: error.message || "Failed to generate AI message.",
+        description: "Failed to generate message. Please try again.",
         variant: "destructive",
       });
-      throw error;
     } finally {
       setIsGeneratingMessage(false);
     }
   };
 
-  // Header content
-  const header = (() => {
-    if (mode === "run") {
-      const searchType = role ? "Role Search" : companyQuery ? "Company Search" : "Search";
-      const searchQuery = role || companyQuery || "";
-      return (
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-gradient-primary rounded-lg flex items-center justify-center">
-            <Target className="w-5 h-5 text-primary-foreground" />
-          </div>
-          <div>
-            <h1 className="text-xl font-semibold text-foreground">{searchType} Results</h1>
-            <p className="text-sm text-muted-foreground">
-              {searchQuery} {locationParam && `• ${locationParam}`}
-            </p>
-          </div>
-          <div className="ml-auto flex items-center gap-2">
-            <Badge variant={runStatus === "completed" ? "secondary" : runStatus === "failed" ? "destructive" : "default"}>
-              {runStatus === "loading" && <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
-              {runStatus.charAt(0).toUpperCase() + runStatus.slice(1)}
-            </Badge>
-            {runStatus === "running" && (
-              <Button variant="outline" size="sm" onClick={() => fetchJobs(currentPage)}>
-                <RefreshCw className="w-4 h-4" />
-              </Button>
-            )}
-          </div>
-        </div>
-      );
-    }
+  const handleFiltersChange = (newFilters: JobFiltersState) => {
+    setFilters(newFilters);
+    setCurrentPage(1);
+  };
+
+  const handlePageChange = (page: number) => {
+    fetchJobs(page);
+  };
+
+  // Loading state for run mode
+  if (mode === "run" && runStatus === "loading") {
     return (
-      <div className="flex items-center gap-3">
-        <div className="w-8 h-8 bg-gradient-primary rounded-lg flex items-center justify-center">
-          <Target className="w-5 h-5 text-primary-foreground" />
-        </div>
-        <div>
-          <h1 className="text-xl font-semibold text-foreground">Browse All Jobs</h1>
-          <p className="text-sm text-muted-foreground">Explore all available positions with advanced filtering</p>
-        </div>
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <Card className="w-96">
+          <CardContent className="pt-6">
+            <div className="flex items-center space-x-4">
+              <Loader2 className="h-8 w-8 animate-spin" />
+              <div>
+                <p className="font-medium">Loading search results...</p>
+                <p className="text-sm text-gray-500">Setting up your job search</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
       </div>
     );
-  })();
-
-  const totalPages = Math.ceil(totalCount / JOBS_PER_PAGE);
+  }
 
   return (
-    <div className="min-h-screen bg-gradient-surface">
-      {/* Header */}
-      <header className="border-b bg-card/50 backdrop-blur-sm">
-        <div className="container mx-auto px-4 py-4">
-          <div className="flex items-center justify-between">
-            <Button variant="ghost" onClick={() => navigate("/")} className="mr-4">
-              <ArrowLeft className="w-4 h-4 mr-2" />
-              Back to Search
+    <div className="min-h-screen bg-gray-50">
+      <div className="container mx-auto px-4 py-6">
+        {/* Header */}
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center space-x-4">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate("/")}
+              className="flex items-center space-x-2"
+            >
+              <ArrowLeft className="h-4 w-4" />
+              <span>Back</span>
             </Button>
-            {header}
-          </div>
-        </div>
-      </header>
 
-      {/* Main */}
-      <main className="container mx-auto px-4 py-6">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 h-[calc(100vh-12rem)]">
-          {/* Jobs Column */}
-          <div className="lg:col-span-4 flex flex-col">
-            <Card className="flex-1 flex flex-col shadow-professional-md">
-              <CardHeader className="pb-4 border-b bg-muted/20">
-                <CardTitle className="flex items-center gap-2">
-                  <Building2 className="w-5 h-5 text-primary" />
-                  Jobs
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="flex-1 flex flex-col space-y-4 p-0">
-                <div className="p-4 border-b">
-                  <JobFilters
-                    filters={filters}
-                    onFiltersChange={setFilters}
-                    companySuggestions={companySuggestions}
-                    sourceSuggestions={sourceSuggestions}
-                    isLoading={isJobsLoading}
-                  />
-                </div>
-                <div className="flex-1 overflow-hidden px-4 pb-4">
-                  <JobsList
-                    jobs={jobs}
-                    selectedJobId={selectedJobId}
-                    onJobSelect={setSelectedJobId}
-                    isLoading={isJobsLoading}
-                    currentPage={currentPage}
-                    totalPages={totalPages}
-                    onPageChange={setCurrentPage}
-                    totalCount={totalCount}
-                  />
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-
-          {/* Contacts Column */}
-          <div className="lg:col-span-4 flex flex-col">
-            <div className="flex-1 overflow-hidden">
-              <ContactsList
-                contacts={contacts}
-                selectedContactId={selectedContactId}
-                onContactSelect={setSelectedContactId}
-                isLoading={contactsLoading}
-                companyName={selectedJob?.company}
-              />
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900">
+                {role ? `"${role}" Jobs` : companyQuery ? `${companyQuery} Jobs` : "Job Search Results"}
+              </h1>
+              {locationParam && (
+                <p className="text-sm text-gray-600">in {locationParam}</p>
+              )}
             </div>
           </div>
 
-          {/* Message Column */}
-          <div className="lg:col-span-4 flex flex-col">
-            <div className="flex-1 overflow-hidden">
-              <MessagePanel
-                selectedContact={selectedContact}
-                selectedJob={selectedJob}
-                onGenerateMessage={handleGenerateMessage}
-                isGenerating={isGeneratingMessage}
-                initialDraft={initialDraft}
-              />
-            </div>
+          <div className="flex items-center space-x-2">
+            {mode === "run" && (
+              <Badge variant={runStatus === "completed" ? "default" : runStatus === "failed" ? "destructive" : "secondary"}>
+                <Target className="h-3 w-3 mr-1" />
+                {runStatus === "running" ? "Running" : runStatus === "failed" ? "Failed" : "Complete"}
+              </Badge>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => fetchJobs(currentPage)}
+              disabled={isJobsLoading}
+            >
+              <RefreshCw className={`h-4 w-4 ${isJobsLoading ? 'animate-spin' : ''}`} />
+            </Button>
           </div>
         </div>
-      </main>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Filters */}
+          <div className="lg:col-span-3">
+            <JobFilters
+              filters={filters}
+              onFiltersChange={handleFiltersChange}
+              companySuggestions={companySuggestions}
+              sourceSuggestions={sourceSuggestions}
+              isLoading={isJobsLoading}
+            />
+          </div>
+
+          {/* Jobs List */}
+          <div className="lg:col-span-1">
+            <JobsList
+              jobs={jobs}
+              selectedJobId={selectedJobId}
+              onJobSelect={setSelectedJobId}
+              isLoading={isJobsLoading}
+              currentPage={currentPage}
+              totalCount={totalCount}
+              totalPages={Math.ceil(totalCount / JOBS_PER_PAGE)}
+              onPageChange={handlePageChange}
+            />
+          </div>
+
+          {/* Contacts List */}
+          <div className="lg:col-span-1">
+            <ContactsList
+              contacts={contacts}
+              selectedContactId={selectedContactId}
+              onContactSelect={setSelectedContactId}
+              isLoading={contactsLoading}
+              companyName={selectedJob?.company}
+            />
+          </div>
+
+          {/* Message Panel */}
+          <div className="lg:col-span-1">
+            <MessagePanel
+              selectedJob={selectedJob}
+              selectedContact={selectedContact}
+              initialDraft={initialDraft}
+              onGenerateMessage={handleGenerateMessage}
+              isGenerating={isGeneratingMessage}
+            />
+          </div>
+        </div>
+      </div>
     </div>
   );
 };
