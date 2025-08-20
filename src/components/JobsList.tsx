@@ -179,13 +179,17 @@ const JobsList = ({
                         variant="ghost"
                         size="sm"
                         className="h-6 px-2 text-xs"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          window.open(job.link, '_blank', 'noopener,noreferrer');
-                        }}
+                        asChild
                       >
-                        <ExternalLink className="w-3 h-3 mr-1" />
-                        View Job
+                        <a 
+                          href={job.link} 
+                          target="_blank" 
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <ExternalLink className="w-3 h-3 mr-1" />
+                          View Job
+                        </a>
                       </Button>
                     )}
                   </div>
