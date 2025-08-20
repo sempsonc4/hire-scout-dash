@@ -279,6 +279,189 @@ Best regards,
     }
   });
 
+  // API endpoint to upsert jobs (for n8n workflow)
+  app.post("/api/jobs/upsert", async (req, res) => {
+    try {
+      const jobData = req.body;
+      
+      // Insert or update job
+      const [job] = await db
+        .insert(jobs)
+        .values({
+          job_id: jobData.job_id,
+          title: jobData.title,
+          company_name: jobData.company_name,
+          company_id: jobData.company_id,
+          location: jobData.location,
+          salary: jobData.salary,
+          posted_at: jobData.posted_at ? new Date(jobData.posted_at) : null,
+          source: jobData.source,
+          source_type: jobData.source_type,
+          link: jobData.link,
+          function: jobData.function,
+          schedule_type: jobData.schedule_type,
+          tags: jobData.tags,
+          relevance_score: jobData.relevance_score,
+          run_id: jobData.run_id,
+          scraped_at: jobData.scraped_at ? new Date(jobData.scraped_at) : new Date(),
+        })
+        .onConflictDoUpdate({
+          target: jobs.job_id,
+          set: {
+            title: jobData.title,
+            company_name: jobData.company_name,
+            company_id: jobData.company_id,
+            location: jobData.location,
+            salary: jobData.salary,
+            posted_at: jobData.posted_at ? new Date(jobData.posted_at) : null,
+            source: jobData.source,
+            source_type: jobData.source_type,
+            link: jobData.link,
+            function: jobData.function,
+            schedule_type: jobData.schedule_type,
+            tags: jobData.tags,
+            relevance_score: jobData.relevance_score,
+            run_id: jobData.run_id,
+            updated_at: new Date(),
+          },
+        })
+        .returning();
+
+      res.json({ success: true, job_id: job.job_id });
+
+    } catch (error) {
+      console.error("Job upsert error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // API endpoint to update run status
+  app.put("/api/runs/:run_id", async (req, res) => {
+    try {
+      const { run_id } = req.params;
+      const { status, stats } = req.body;
+
+      await db
+        .update(runs)
+        .set({
+          status: status as any,
+          stats: stats || {},
+          updated_at: new Date(),
+        })
+        .where(eq(runs.run_id, run_id));
+
+      res.json({ success: true });
+
+    } catch (error) {
+      console.error("Run update error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // API endpoint to upsert companies
+  app.post("/api/companies/upsert", async (req, res) => {
+    try {
+      const companyData = req.body;
+
+      const [company] = await db
+        .insert(companies)
+        .values({
+          company_id: companyData.company_id,
+          name: companyData.name,
+          domain: companyData.domain,
+          industry: companyData.industry,
+          linkedin: companyData.linkedin,
+          size: companyData.size,
+        })
+        .onConflictDoUpdate({
+          target: companies.company_id,
+          set: {
+            name: companyData.name,
+            domain: companyData.domain,
+            industry: companyData.industry,
+            linkedin: companyData.linkedin,
+            size: companyData.size,
+          },
+        })
+        .returning();
+
+      res.json({ success: true, company_id: company.company_id });
+
+    } catch (error) {
+      console.error("Company upsert error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // API endpoint to upsert contacts
+  app.post("/api/contacts/upsert", async (req, res) => {
+    try {
+      const contactData = req.body;
+
+      const [contact] = await db
+        .insert(contacts)
+        .values({
+          contact_id: contactData.contact_id,
+          name: contactData.name,
+          title: contactData.title,
+          email: contactData.email,
+          email_status: contactData.email_status as any,
+          linkedin: contactData.linkedin,
+          phone: contactData.phone,
+          company_id: contactData.company_id,
+          job_id: contactData.job_id,
+          source: contactData.source,
+          confidence: contactData.confidence,
+          notes: contactData.notes,
+        })
+        .onConflictDoUpdate({
+          target: contacts.contact_id,
+          set: {
+            name: contactData.name,
+            title: contactData.title,
+            email: contactData.email,
+            email_status: contactData.email_status as any,
+            linkedin: contactData.linkedin,
+            phone: contactData.phone,
+            company_id: contactData.company_id,
+            job_id: contactData.job_id,
+            source: contactData.source,
+            confidence: contactData.confidence,
+            notes: contactData.notes,
+          },
+        })
+        .returning();
+
+      res.json({ success: true, contact_id: contact.contact_id });
+
+    } catch (error) {
+      console.error("Contact upsert error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // API endpoint to get companies by run_id (for your SQL query step)
+  app.get("/api/runs/:run_id/companies", async (req, res) => {
+    try {
+      const { run_id } = req.params;
+
+      const companies_list = await db
+        .select({
+          company_name: jobs.company_name,
+          company_id: jobs.company_id,
+        })
+        .from(jobs)
+        .where(eq(jobs.run_id, run_id))
+        .groupBy(jobs.company_name, jobs.company_id);
+
+      res.json({ data: companies_list });
+
+    } catch (error) {
+      console.error("Companies by run error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   const httpServer = createServer(app);
 
   return httpServer;

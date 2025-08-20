@@ -1,0 +1,126 @@
+Here’s the high-level map of what this workflow does and how the pieces fit. I kept it tight and ordered so you can skim or dive.
+
+# 1) Purpose
+
+* **Automate role discovery and enrichment**, then **persist** results to Supabase.
+* **Optionally enrich contacts** at companies (via Apollo) for outreach.
+* Expose a **/search/start** webhook that returns a short-lived **JWT + view\_token** so the frontend can read run-scoped data.
+
+# 2) Entry points
+
+* **POST /search/start** → kicks off a Google Jobs search run.
+* **Manual/Company-based path** → takes a company list and enriches org + contacts (Apollo).
+
+# 3) Run setup & auth (API path)
+
+* `Webhook - Start Search` → **Normalize & Generate IDs** (creates `run_id`, `search_id`, `view_token`; validates `query` + `params.location`).
+* **Guard Error?** routes bad input to **Respond Error (POST)**.
+* **Runs: INSERT (API)** upserts the run (`status='running'`, stores `params`).
+* **Build JWT Parts → Crypto → Assemble JWT** builds a **Supabase-compatible JWT** (HS256) embedding `view_token`.
+* **Build Start Response → Respond OK (POST)** returns `{ run_id, view_token, supabase_jwt, exp }` to the caller.
+
+# 4) Search engine (Google Jobs via SerpAPI)
+
+* **Unified Input** → **Manage Search State** initializes a **global searchState** with:
+
+  * Query, location, safety limits (`max_results`, `max_pages`, `absolute_max_results`, `enable_safeguards`).
+  * Loop counters + `next_page_token`.
+* **If** decides **first page** vs **next page** node.
+* **Search Google Jobs (First/Next Page)** fetches results; **Wait** adds a small pause.
+* **Process Jobs**:
+
+  * Accumulates `jobs_results`, updates `next_page_token`.
+  * Checks stop conditions (no next page, hit result/page caps).
+  * When done: emits **final summary** (counts, stop reason) and clears global state.
+
+# 5) Normalization & light heuristics
+
+* **Extract & Format Job Info** transforms each job into your canonical shape:
+
+  * Fields: `job_id, title, company_name, location, schedule_type, salary?, posted_at (parsed), source, source_type, link, scraped_at`.
+  * **Source classification**: Job Board / Company Site / Recruiting Agency / Other, using domain + text heuristics.
+  * **Missing fields detection**: builds `missing_fields` and a minimal `ai_payload` only when needed (salary/employer).
+  * (Filter example in this node keeps **MN** jobs only.)
+
+# 6) Targeted AI enrichment (only when needed)
+
+* **Needs AI Enrichment?** branches on `missing_fields`.
+* **AI Enrichment (OpenAI)** with a strict system prompt:
+
+  * Only returns keys you asked for (e.g., `salary`, `company_name` for end-client).
+  * **No guesses**, no commentary, **JSON only**.
+* **Prepare Enriched Data**:
+
+  * Parses/normalizes LLM output.
+  * Coerces any structured salary into the required **single-line string**.
+* **Merge Job Results with Enriched Data** joins by `job_id` (prefer original, overlay enriched keys).
+
+# 7) Persistence & run finalization
+
+* **Upsert Job**:
+
+  * Inserts or updates `public.jobs`; always moves the job to the **latest `run_id`** that touched it.
+  * Also writes to `public.job_runs (run_id, job_id)`.
+* **Wait For Upsert** then **Finalize Run**:
+
+  * Sets run `status='completed'`, stores stats (`total_fetched`, `total_available`, `pages_fetched`, `iterations_completed`, `stop_reason`, `safeguards_enabled`).
+
+# 8) Company → Contacts enrichment path (Apollo)
+
+* Intended for “take companies from a run or manual input → ensure org → find decision makers → upsert contacts”.
+* **Execute a SQL query (by run\_id)** can emit a company list from the jobs you just scraped; **Separate Companies** fans them out.
+* **Set Params → Resolve Company & Org** looks up the company in your DB and counts existing contacts.
+* **org\_id missing?**:
+
+  * If missing, **Apollo Organization Search** runs, then **Code** normalizes Apollo’s response.
+  * **Merge1** merges back into the company record.
+* **Ensure/Upsert Company**:
+
+  * Safely finds or creates the company, sets `apollo_org_id` only if not claimed elsewhere, returns `company_id`, `org_id`, `domain`, and contact counts.
+* **Needs Contacts?**:
+
+  * If `do_contacts` and there are **no contacts yet**, continue.
+  * **Set Apollo Params** defines target titles/seniorities/locations.
+  * **Apollo People Search1** gets candidate people.
+  * **Pre-Filter + Bulk Enrichment** trims to ≤10 and sends **only Apollo IDs** to save credits.
+  * **Apollo Bulk People Enrichment** reveals details (per settings).
+  * **Extract & Format** builds clean contact objects with strong de-dupe.
+  * **Upsert Contacts**:
+
+    * Three upsert paths with sensible uniqueness:
+
+      1. **apollo\_contact\_id**,
+      2. `(company_id, lower(email))`,
+      3. `(company_id, lower(linkedin))`.
+
+> (There’s an **Apollo Organization Job Postings (GET)** node stubbed/disabled for later company-jobs ingestion.)
+
+# 9) Manual/test path
+
+* **Generate ID’s Manual** lets you run the engine without the webhook (fills IDs/params).
+* **Input (query, params)** provides a quick default query (“Data Analyst”, Minneapolis) for ad-hoc runs.
+* **Company Based Job Search / When clicking ‘Execute workflow’ / Company Based Search Inputs** support manual testing of the company→contacts branch.
+
+# 10) Safety, guards, and observability
+
+* **Safeguards**: hard caps on results/pages and an **absolute\_max\_results** to prevent runaway pagination.
+* **State**: uses **global staticData** to accumulate pages reliably.
+* **Logs**: code nodes `console.log` iteration counts, page counts, reasons for stop.
+* **Error handling**: early validation returns a structured JSON error with proper HTTP code.
+* **RLS alignment**: frontend reads via **`view_token` in JWT**; runs store that token.
+
+---
+
+## TL;DR flow
+
+1. **Call `/search/start`** → run created, JWT returned.
+2. **Paged Google Jobs** → accumulate → normalize → (AI if needed) → **upsert jobs**.
+3. **Finalize run stats**.
+4. (Optional) **For each company** → resolve/ensure in DB → **Apollo org + people** → **bulk enrich** → **upsert contacts**.
+
+If you want, I can annotate the exact nodes to **toggle/param** for:
+
+* expanding beyond MN,
+* changing AI enrichment scope,
+* adjusting contact seniorities/titles,
+* or wiring the **company path** to consume distinct companies from the just-finished run automatically (it’s half-wired already via the `Execute a SQL query` → `Separate Companies` branch).
