@@ -1,0 +1,415 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH s AS (\n  SELECT\n    $1::text               AS run_id,\n    NULLIF($2::text,'')    AS search_id,\n    $3::text               AS query,\n    $4::jsonb              AS params,\n    NULLIF($4::jsonb->>'location','') AS location,\n    $5::text               AS view_token\n),\nmaybe_search AS (\n  INSERT INTO public.searches (search_id, query, location, params, created_at)\n  SELECT search_id, query, location, params, now()\n  FROM s\n  WHERE search_id IS NOT NULL AND location IS NOT NULL\n  ON CONFLICT (search_id) DO UPDATE\n    SET query    = EXCLUDED.query,\n        location = EXCLUDED.location,\n        params   = EXCLUDED.params\n),\nupsert_run AS (\n  INSERT INTO public.runs\n    (run_id, search_id, query, params, status, stats, view_token, created_at, updated_at)\n  SELECT\n    run_id,\n    CASE WHEN location IS NOT NULL AND search_id IS NOT NULL THEN search_id ELSE NULL END,\n    query,\n    params,\n    'running',\n    '{}'::jsonb,\n    view_token,\n    now(),\n    now()\n  FROM s\n  ON CONFLICT (run_id) DO UPDATE\n    SET\n      search_id  = COALESCE(public.runs.search_id, EXCLUDED.search_id),\n      view_token = COALESCE(public.runs.view_token, EXCLUDED.view_token),\n      updated_at = now()\n  RETURNING public.runs.run_id, public.runs.view_token\n)\nSELECT run_id, view_token FROM upsert_run;\n",
+        "options": {
+          "queryReplacement": "={{ $json.run_id }}, {{ $json.search_id || null }}, {{ $json.query }}, {{ JSON.stringify($json.params || {}) }}, {{ $json.view_token }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1680,
+        80
+      ],
+      "id": "11fb265d-9214-4e5f-bf35-6d3eee2f8462",
+      "name": "Runs: INSERT",
+      "credentials": {
+        "postgres": {
+          "id": "vgUdpMDjCIUzlJSZ",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH r AS (SELECT $1::jsonb AS j),\nupsert_job AS (\n  INSERT INTO public.jobs\n    (job_id, run_id, title, company_name, location, schedule_type,\n     salary, source, source_type, link, posted_at, scraped_at)\n  SELECT\n    j->>'job_id',\n    (j->>'run_id')::text,  -- <-- write the current run on INSERT\n    NULLIF(j->>'title',''),\n    NULLIF(j->>'company_name',''),\n    NULLIF(j->>'location',''),\n    NULLIF(j->>'schedule_type',''),\n    NULLIF(j->>'salary',''),\n    NULLIF(j->>'source',''),\n    NULLIF(j->>'source_type',''),\n    NULLIF(j->>'link',''),\n    CASE WHEN (j->>'posted_at')  ~ '^\\d{4}-\\d{2}-\\d{2}$' THEN (j->>'posted_at')::date  ELSE NULL END,\n    COALESCE(\n      CASE WHEN (j->>'scraped_at') ~ '^\\d{4}-\\d{2}-\\d{2}$' THEN (j->>'scraped_at')::date ELSE NULL END,\n      CURRENT_DATE\n    )\n  FROM r\n  ON CONFLICT (job_id) DO UPDATE SET\n    -- ALWAYS move the job to the *latest* run that touches it\n    run_id        = EXCLUDED.run_id,\n    title         = COALESCE(public.jobs.title, EXCLUDED.title),\n    company_name  = COALESCE(NULLIF(public.jobs.company_name,''),  NULLIF(EXCLUDED.company_name,'')),\n    location      = COALESCE(NULLIF(public.jobs.location,''),      NULLIF(EXCLUDED.location,'')),\n    schedule_type = COALESCE(NULLIF(public.jobs.schedule_type,''), NULLIF(EXCLUDED.schedule_type,'')),\n    salary        = COALESCE(NULLIF(public.jobs.salary,''),        NULLIF(EXCLUDED.salary,'')),\n    source        = COALESCE(NULLIF(public.jobs.source,''),        NULLIF(EXCLUDED.source,'')),\n    source_type   = COALESCE(NULLIF(public.jobs.source_type,''),   NULLIF(EXCLUDED.source_type,'')),\n    link          = COALESCE(NULLIF(public.jobs.link,''),          NULLIF(EXCLUDED.link,'')),\n    posted_at     = COALESCE(public.jobs.posted_at, EXCLUDED.posted_at),\n    scraped_at    = COALESCE(public.jobs.scraped_at, EXCLUDED.scraped_at),\n    updated_at    = now()\n  RETURNING job_id\n)\nINSERT INTO public.job_runs (run_id, job_id)\nSELECT (r.j->>'run_id')::text, u.job_id\nFROM r\nJOIN upsert_job u ON TRUE\nON CONFLICT DO NOTHING;\n",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify($json) }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1216,
+        64
+      ],
+      "id": "05ce8f27-2c4d-4e45-ad12-ef473a2e7ce1",
+      "name": "Upsert Job",
+      "alwaysOutputData": false,
+      "credentials": {
+        "postgres": {
+          "id": "vgUdpMDjCIUzlJSZ",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH s AS (SELECT\n  $1::text  AS run_id,\n  $2::int   AS total_fetched,\n  $3::int   AS total_available,\n  $4::int   AS pages_fetched,\n  $5::int   AS iterations_completed,\n  $6::bool  AS safeguards_enabled,\n  $7::text  AS stop_reason\n)\nUPDATE public.runs r\nSET status='completed',\n    stats = jsonb_strip_nulls(\n      COALESCE(r.stats,'{}'::jsonb) ||\n      jsonb_build_object(\n        'total_fetched',        (SELECT total_fetched        FROM s),\n        'total_available',      (SELECT total_available      FROM s),\n        'pages_fetched',        (SELECT pages_fetched        FROM s),\n        'iterations_completed', (SELECT iterations_completed FROM s),\n        'safeguards_enabled',   (SELECT safeguards_enabled   FROM s),\n        'stop_reason',          (SELECT stop_reason          FROM s)\n      )\n    ),\n    updated_at = now()\nWHERE r.run_id = (SELECT run_id FROM s);\n",
+        "options": {
+          "queryReplacement": "={{ $('Search Additional Pages?').item.json.run_id }}, {{ $('Process Jobs').item.json.total_fetched }}, {{ $('Process Jobs').item.json.total_available }}, {{ $('Process Jobs').item.json.pages_fetched }}, {{ $('Process Jobs').item.json.iterations_completed }}, {{ $('Process Jobs').item.json.safeguards_enabled }}, {{ $('Process Jobs').item.json.stop_reason }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1664,
+        64
+      ],
+      "id": "233fdd48-c41a-4337-a5fc-fba2a81711c2",
+      "name": "Finalize Run",
+      "credentials": {
+        "postgres": {
+          "id": "vgUdpMDjCIUzlJSZ",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "/search/start",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -3920,
+        64
+      ],
+      "id": "d7bb709f-0f65-4014-bc80-d645530d4cb2",
+      "name": "Webhook - Start Search",
+      "webhookId": "b412484f-be78-45bc-b9d3-a6fb8967d53a"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH s AS (\n  SELECT\n    $1::text  AS run_id,\n    NULLIF($2::text,'') AS search_id,\n    $3::text  AS query,\n    $4::jsonb AS params,\n    NULLIF($4::jsonb->>'location','') AS location,\n    $5::text  AS view_token              -- NEW\n)\n, maybe_search AS (\n  INSERT INTO public.searches (search_id, query, location, params, created_at)\n  SELECT search_id, query, location, params, now() FROM s\n  WHERE search_id IS NOT NULL AND location IS NOT NULL\n  ON CONFLICT (search_id) DO UPDATE\n    SET query=EXCLUDED.query, location=EXCLUDED.location, params=EXCLUDED.params\n)\nINSERT INTO public.runs\n  (run_id, search_id, query, params, status, stats, view_token, created_at, updated_at)\nSELECT\n  run_id,\n  CASE WHEN location IS NOT NULL AND search_id IS NOT NULL THEN search_id ELSE NULL END,\n  query,\n  params,\n  'running',\n  '{}'::jsonb,\n  view_token,        -- NEW\n  now(), now()\nFROM s\nRETURNING run_id, view_token;\n",
+        "options": {
+          "queryReplacement": "={{ $json.run_id }}, {{ $json.search_id || null }}, {{ $json.query }}, {{ JSON.stringify($json.params || {}) }}, {{ $json.view_token }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -3296,
+        80
+      ],
+      "id": "d9e70fa3-fd20-440f-a9a6-8d80fa6438bf",
+      "name": "Runs: INSERT (API)",
+      "credentials": {
+        "postgres": {
+          "id": "vgUdpMDjCIUzlJSZ",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{$json}}",
+        "options": {
+          "responseCode": "={{ $json.httpCode || 400 }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Vary",
+                "value": "Origin"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        -3296,
+        -272
+      ],
+      "id": "0b30abac-1d5e-4a22-bfc1-6d50b1d86ef8",
+      "name": "Respond Error (POST)"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Vary",
+                "value": "Origin"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        -2112,
+        -144
+      ],
+      "id": "969a7790-4dab-4d21-b855-c57b63d73bdc",
+      "name": "Respond OK (POST)"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH i AS (SELECT ($1::jsonb) AS j),\nincoming AS (\n  SELECT\n    NULLIF(trim(j->>'company_name'), '')          AS company_name,\n    NULLIF(trim(j->>'org_id'), '')                AS org_id_in,\n    NULLIF(trim(j->>'domain'), '')                AS domain_in,\n    COALESCE((j->>'do_contacts')::boolean, false) AS do_contacts,\n    COALESCE((j->>'do_jobs')::boolean, false)     AS do_jobs\n  FROM i\n),\n-- … rest of your safe upsert CTEs …\n\n-- (A) If some row already has this org_id, we want THAT row.\norg_owner AS (\n  SELECT c.company_id, c.name, c.apollo_org_id, c.domain\n  FROM public.companies c\n  JOIN incoming inc ON inc.org_id_in IS NOT NULL\n  WHERE c.apollo_org_id = inc.org_id_in\n  LIMIT 1\n),\n\n-- (B) Otherwise, try to match by DOMAIN or NAME\nby_domain_or_name AS (\n  SELECT c.company_id, c.name, c.apollo_org_id, c.domain\n  FROM public.companies c\n  JOIN incoming inc\n    ON (inc.domain_in IS NOT NULL AND c.domain = inc.domain_in)\n    OR (inc.company_name IS NOT NULL AND lower(c.name) = lower(inc.company_name))\n  LIMIT 1\n),\n\n-- (C) Otherwise, insert a new row if we have a name\nensure_company AS (\n  INSERT INTO public.companies (name, domain, created_at, updated_at)\n  SELECT inc.company_name, inc.domain_in, now(), now()\n  FROM incoming inc\n  WHERE inc.company_name IS NOT NULL\n    AND NOT EXISTS (\n      SELECT 1 FROM public.companies c\n      WHERE lower(c.name) = lower(inc.company_name)\n         OR (inc.domain_in IS NOT NULL AND c.domain = inc.domain_in)\n    )\n  RETURNING company_id, name, apollo_org_id, domain\n),\n\n-- Final target preference: org_owner > by_domain_or_name > ensure_company\ntarget AS (\n  SELECT * FROM org_owner\n  UNION ALL\n  SELECT * FROM by_domain_or_name WHERE NOT EXISTS (SELECT 1 FROM org_owner)\n  UNION ALL\n  SELECT * FROM ensure_company   WHERE NOT EXISTS (SELECT 1 FROM org_owner)\n                                 AND NOT EXISTS (SELECT 1 FROM by_domain_or_name)\n),\n\n-- Safe update: only set apollo_org_id if (a) it's ours already or (b) no one else has it\nupdated AS (\n  UPDATE public.companies c\n  SET\n    apollo_org_id = CASE\n      WHEN inc.org_id_in IS NULL THEN c.apollo_org_id\n      WHEN c.apollo_org_id = inc.org_id_in THEN c.apollo_org_id\n      WHEN c.apollo_org_id IS NULL\n           AND NOT EXISTS (\n             SELECT 1 FROM public.companies x\n             WHERE x.apollo_org_id = inc.org_id_in\n               AND x.company_id <> c.company_id\n           )\n        THEN inc.org_id_in\n      ELSE c.apollo_org_id  -- leave as-is to avoid unique violation\n    END,\n    name       = COALESCE(c.name, inc.company_name),\n    domain     = COALESCE(c.domain, inc.domain_in),\n    updated_at = now()\n  FROM incoming inc\n  WHERE c.company_id = (SELECT company_id FROM target)\n  RETURNING c.company_id, c.name, c.apollo_org_id, c.domain\n),\n\nfinal_company AS (\n  SELECT\n    c.company_id,\n    c.name,\n    c.apollo_org_id AS org_id,\n    c.domain\n  FROM updated c\n),\n\ncontact_stats AS (\n  SELECT fc.company_id, COUNT(k.contact_id) AS contacts_total\n  FROM final_company fc\n  LEFT JOIN public.contacts k ON k.company_id = fc.company_id\n  GROUP BY fc.company_id\n)\n\nSELECT\n  inc.company_name,\n  fc.company_id,\n  fc.org_id,\n  fc.domain,\n  COALESCE(cs.contacts_total,0) AS contacts_total,\n  (COALESCE(cs.contacts_total,0) > 0) AS has_contacts,\n  inc.do_contacts,\n  inc.do_jobs\nFROM incoming inc, final_company fc\nLEFT JOIN contact_stats cs ON cs.company_id = fc.company_id;\n",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({\n  company_name: $json.company_name,\n  org_id:       $json.org_id ?? null,\n  domain:       $json.domain ?? null,\n  do_contacts:  $json.do_contacts ?? false,\n  do_jobs:      $json.do_jobs ?? false\n}) }}\n"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -176,
+        1120
+      ],
+      "id": "0c4d64ba-8216-4d13-8ed8-5eb32ec40c44",
+      "name": "Ensure/Upsert Company",
+      "credentials": {
+        "postgres": {
+          "id": "vgUdpMDjCIUzlJSZ",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH src_raw AS (\n  SELECT *\n  FROM jsonb_to_recordset($1::jsonb) AS t(\n    apollo_contact_id text,\n    company_id        uuid,\n    job_id            text,\n    name              text,\n    title             text,\n    email             text,\n    linkedin          text,\n    phone             text,\n    email_status      text,\n    confidence        numeric,\n    source            text,\n    notes             text,\n    company_name      text\n  )\n),\nsrc_norm AS (\n  SELECT\n    NULLIF(apollo_contact_id,'')                        AS apollo_contact_id,\n    company_id, job_id, name, title,\n    NULLIF(email,'')                                    AS email,\n    NULLIF(linkedin,'')                                 AS linkedin,\n    NULLIF(phone,'')                                    AS phone,\n    NULLIF(email_status,'')                             AS email_status,\n    confidence,\n    COALESCE(source,'apollo')                           AS source,\n    NULLIF(notes,'')                                    AS notes,\n    NULLIF(company_name,'')                             AS company_name,\n    lower(NULLIF(email,''))                             AS email_norm,\n    lower(NULLIF(linkedin,''))                          AS linkedin_norm\n  FROM src_raw\n),\n\n-- 1) Apollo-ID path, one row per apollo_contact_id\nsrc_apollo AS (\n  SELECT DISTINCT ON (apollo_contact_id)\n    apollo_contact_id, company_id, job_id, name, title,\n    email, linkedin, phone, email_status, confidence, source, notes, company_name\n  FROM src_norm\n  WHERE apollo_contact_id IS NOT NULL\n  ORDER BY apollo_contact_id,\n           (email IS NULL) ASC, (linkedin IS NULL) ASC, name NULLS LAST\n),\nins_apollo AS (\n  INSERT INTO public.contacts AS c\n    (apollo_contact_id, company_id, job_id, name, title, email, linkedin, phone,\n     email_status, confidence, source, notes, company_name, created_at, updated_at)\n  SELECT\n    apollo_contact_id, company_id, job_id, name, title, email, linkedin, phone,\n    email_status, confidence, source, notes, company_name, now(), now()\n  FROM src_apollo\n  ON CONFLICT (apollo_contact_id) DO UPDATE SET\n    name         = EXCLUDED.name,\n    title        = EXCLUDED.title,\n    email        = COALESCE(EXCLUDED.email, c.email),\n    linkedin     = COALESCE(EXCLUDED.linkedin, c.linkedin),\n    phone        = COALESCE(EXCLUDED.phone, c.phone),\n    email_status = COALESCE(EXCLUDED.email_status, c.email_status),\n    confidence   = COALESCE(EXCLUDED.confidence, c.confidence),\n    source       = EXCLUDED.source,\n    notes        = COALESCE(EXCLUDED.notes, c.notes),\n    company_name = COALESCE(EXCLUDED.company_name, c.company_name),\n    company_id   = COALESCE(c.company_id, EXCLUDED.company_id),\n    updated_at   = now()\n  RETURNING 1\n),\n\n-- 2) Email path (no apollo id), one row per (company_id, email)\nsrc_email AS (\n  SELECT DISTINCT ON (company_id, email_norm)\n    company_id, job_id, name, title, email, linkedin, phone,\n    email_status, confidence, source, notes, company_name\n  FROM src_norm\n  WHERE apollo_contact_id IS NULL\n    AND email IS NOT NULL\n  ORDER BY company_id, email_norm,\n           (linkedin IS NULL) ASC, name NULLS LAST\n),\nins_email AS (\n  INSERT INTO public.contacts AS c\n    (company_id, job_id, name, title, email, linkedin, phone,\n     email_status, confidence, source, notes, company_name, created_at, updated_at)\n  SELECT\n    company_id, job_id, name, title, email, linkedin, phone,\n    email_status, confidence, source, notes, company_name, now(), now()\n  FROM src_email\n  ON CONFLICT (company_id, lower(email)) WHERE c.email IS NOT NULL DO UPDATE SET\n    name         = EXCLUDED.name,\n    title        = EXCLUDED.title,\n    phone        = COALESCE(EXCLUDED.phone, c.phone),\n    email_status = COALESCE(EXCLUDED.email_status, c.email_status),\n    confidence   = COALESCE(EXCLUDED.confidence, c.confidence),\n    source       = EXCLUDED.source,\n    notes        = COALESCE(EXCLUDED.notes, c.notes),\n    company_name = COALESCE(EXCLUDED.company_name, c.company_name),\n    updated_at   = now()\n  RETURNING 1\n),\n\n-- 3) LinkedIn path (no apollo id, no email), one row per (company_id, linkedin)\nsrc_linkedin AS (\n  SELECT DISTINCT ON (company_id, linkedin_norm)\n    company_id, job_id, name, title, linkedin, phone,\n    email_status, confidence, source, notes, company_name\n  FROM src_norm\n  WHERE apollo_contact_id IS NULL\n    AND email IS NULL\n    AND linkedin IS NOT NULL\n  ORDER BY company_id, linkedin_norm, name NULLS LAST\n),\nins_linkedin AS (\n  INSERT INTO public.contacts AS c\n    (company_id, job_id, name, title, email, linkedin, phone,\n     email_status, confidence, source, notes, company_name, created_at, updated_at)\n  SELECT\n    company_id, job_id, name, title, NULL, linkedin, phone,\n    email_status, confidence, source, notes, company_name, now(), now()\n  FROM src_linkedin\n  ON CONFLICT (company_id, lower(linkedin)) WHERE c.linkedin IS NOT NULL DO UPDATE SET\n    name         = EXCLUDED.name,\n    title        = EXCLUDED.title,\n    phone        = COALESCE(EXCLUDED.phone, c.phone),\n    company_name = COALESCE(EXCLUDED.company_name, c.company_name),\n    updated_at   = now()\n  RETURNING 1\n)\n\nSELECT\n  COALESCE((SELECT count(*) FROM ins_apollo),   0) AS upserted_by_apollo,\n  COALESCE((SELECT count(*) FROM ins_email),    0) AS upserted_by_email,\n  COALESCE((SELECT count(*) FROM ins_linkedin), 0) AS upserted_by_linkedin;\n",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify($json.contacts) }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1408,
+        832
+      ],
+      "id": "199803eb-5b66-4a80-9b6d-74586707ef47",
+      "name": "Upsert Contacts",
+      "credentials": {
+        "postgres": {
+          "id": "vgUdpMDjCIUzlJSZ",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH c AS (\n  SELECT company_id,\n         apollo_org_id AS org_id,\n         name\n  FROM public.companies\n  WHERE lower(name) = lower($1::text)\n  LIMIT 1\n),\ncontact_stats AS (\n  SELECT c.company_id,\n         COUNT(k.contact_id) AS contacts_total\n  FROM c\n  LEFT JOIN public.contacts k ON k.company_id = c.company_id\n  GROUP BY c.company_id\n)\nSELECT\n  $1::text                                   AS company_name,\n  (SELECT company_id FROM c)                  AS company_id,\n  (SELECT org_id FROM c)                      AS org_id,\n  COALESCE((SELECT contacts_total FROM contact_stats), 0) AS contacts_total,\n  COALESCE((SELECT contacts_total FROM contact_stats), 0) > 0 AS has_contacts,\n  $2::boolean                                 AS do_contacts,\n  $3::boolean                                 AS do_jobs\n;\n",
+        "options": {
+          "queryReplacement": "={{ $json.company_name }}, {{ $json.do_contacts }}, {{ $json.do_jobs }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1776,
+        1088
+      ],
+      "id": "b5bcca66-6b31-4efc-8bdc-a16e1ea45c05",
+      "name": "Resolve Company & Org",
+      "credentials": {
+        "postgres": {
+          "id": "vgUdpMDjCIUzlJSZ",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH target_run AS (\n  SELECT $1::text AS run_id\n),\ndistinct_companies AS (\n  SELECT DISTINCT j.company_name\n  FROM public.jobs j\n  JOIN target_run r ON j.run_id = r.run_id\n  WHERE j.company_name IS NOT NULL\n    AND j.company_name <> ''\n)\nSELECT jsonb_agg(jsonb_build_object(\n  'company_name', dc.company_name,\n  'do_contacts', true,\n  'do_jobs', false           -- reuse later if you add “Apollo jobs”\n)) AS companies\nFROM distinct_companies dc;\n",
+        "options": {
+          "queryReplacement": "={{ $json.run_id }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -2304,
+        736
+      ],
+      "id": "051db117-1981-4036-9668-bed4203b9608",
+      "name": "Execute a SQL query",
+      "credentials": {
+        "postgres": {
+          "id": "vgUdpMDjCIUzlJSZ",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "path": "/company-search/start",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -2800,
+        1216
+      ],
+      "id": "fe2049d1-115a-4c50-81af-d068185c33d8",
+      "name": "Company Based Job Search",
+      "webhookId": "ae3bb2f3-80f4-415b-8d26-08fca4d04c86"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "/message/generate",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -2704,
+        1792
+      ],
+      "id": "cc0e59ef-2289-4702-8305-8fea8c9402c0",
+      "name": "Generate Message",
+      "webhookId": "1e8c7b15-b3df-4498-b4bb-fc0b821b8a7a"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH inc AS (\n  SELECT\n    $1::uuid AS contact_id,\n    $2::text AS job_id,\n    $3::text AS template_version,\n    $4::text AS variant\n),\nk AS (\n  SELECT c.*\n  FROM public.contacts c\n  WHERE c.contact_id = (SELECT contact_id FROM inc)\n),\nj AS (\n  SELECT jb.*\n  FROM public.jobs jb\n  WHERE jb.job_id = (SELECT job_id FROM inc)\n),\nc AS (\n  SELECT co.*\n  FROM public.companies co\n  WHERE co.company_id = COALESCE(\n    (SELECT company_id FROM j),\n    (SELECT company_id FROM k)\n  )\n),\nchecks AS (\n  SELECT\n    EXISTS (SELECT 1 FROM k) AS has_contact,\n    EXISTS (SELECT 1 FROM j) AS has_job,\n    CASE\n      WHEN NOT EXISTS (SELECT 1 FROM k) OR NOT EXISTS (SELECT 1 FROM j)\n        THEN false\n      -- if the contact has no company, allow it\n      WHEN (SELECT company_id FROM k) IS NULL\n        THEN true\n      -- if the job has no company, compare names (case-insensitive)\n      WHEN (SELECT company_id FROM j) IS NULL\n        THEN lower(COALESCE((SELECT company_name FROM k), '')) =\n             lower(COALESCE((SELECT company_name FROM j), ''))\n      -- otherwise compare by company_id (null-safe)\n      ELSE (SELECT company_id FROM k) = (SELECT company_id FROM j)\n    END AS same_company\n)\nSELECT\n  (SELECT contact_id       FROM inc) AS contact_id,\n  (SELECT job_id           FROM inc) AS job_id,\n  (SELECT template_version FROM inc) AS template_version,\n  (SELECT variant          FROM inc) AS variant,\n\n  (SELECT row_to_json(k) FROM k) AS contact,\n  (SELECT row_to_json(j) FROM j) AS job,\n  (SELECT row_to_json(c) FROM c) AS company,\n\n  (SELECT has_contact  FROM checks) AS has_contact,\n  (SELECT has_job      FROM checks) AS has_job,\n  (SELECT same_company FROM checks) AS same_company;\n",
+        "options": {
+          "queryReplacement": "={{ $json.contact_id }}, {{ $json.job_id }}, {{ $json.template_version }}, {{ $json.variant }}\n"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -2240,
+        1792
+      ],
+      "id": "7796293a-4349-4427-a6c3-8c22f951aeb1",
+      "name": "Fetch Context",
+      "credentials": {
+        "postgres": {
+          "id": "vgUdpMDjCIUzlJSZ",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH i AS (SELECT $1::jsonb AS j),\nincoming AS (\n  SELECT\n    (j->>'contact_id')::uuid             AS contact_id,\n    (j->>'job_id')::text                 AS job_id,\n    NULLIF(j->>'company_id','')::uuid    AS company_id_in,\n    j->>'subject'                        AS subject,\n    j->>'body'                           AS body,\n    j->>'preview_text'                   AS preview_text,\n    NULLIF(j->>'tone','')                AS tone,\n    NULLIF(j->>'template_version','v1')  AS template_version,\n    NULLIF(j->>'variant','a')            AS variant\n  FROM i\n),\nresolved AS (\n  SELECT\n    i.contact_id,\n    i.job_id,\n    COALESCE(\n      i.company_id_in,\n      (SELECT k.company_id FROM public.contacts k WHERE k.contact_id = i.contact_id),\n      (SELECT j.company_id FROM public.jobs j WHERE j.job_id = i.job_id)\n    ) AS company_id,\n    i.subject, i.body, i.preview_text, i.tone, i.template_version, i.variant\n  FROM incoming i\n)\nINSERT INTO public.outreach_messages\n  (contact_id, job_id, company_id, subject, body, preview_text, tone,\n   template_version, variant, status, created_at, updated_at)\nSELECT\n  r.contact_id, r.job_id, r.company_id, r.subject, r.body, r.preview_text, r.tone,\n  COALESCE(r.template_version, 'v1'), COALESCE(r.variant, 'a'),\n  'draft', now(), now()\nFROM resolved r\nON CONFLICT (contact_id, job_id)\nDO UPDATE SET\n  subject          = EXCLUDED.subject,\n  body             = EXCLUDED.body,\n  preview_text     = EXCLUDED.preview_text,\n  tone             = EXCLUDED.tone,\n  template_version = COALESCE(EXCLUDED.template_version, public.outreach_messages.template_version),\n  variant          = COALESCE(EXCLUDED.variant, public.outreach_messages.variant),\n  company_id       = COALESCE(public.outreach_messages.company_id, EXCLUDED.company_id),\n  status           = 'draft',\n  updated_at       = now()\nRETURNING *;\n",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify({\n  contact_id: $json.contact_id,\n  job_id: $json.job_id,\n  company_id: $json.company_id || null,\n  subject: ($json.output?.subject ?? ''),\n  body: ($json.output?.body ?? ''),\n  preview_text: ($json.output?.preview_text ?? ''),\n  tone: ($json.output?.tone ?? null),\n  template_version: ($json.output?.template_version ?? 'v1'),\n  variant: ($json.output?.variant ?? 'a')\n}) }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -768,
+        1808
+      ],
+      "id": "05f3ee3e-8056-4155-8443-b4f80ca34b7e",
+      "name": "Upsert Draft",
+      "credentials": {
+        "postgres": {
+          "id": "vgUdpMDjCIUzlJSZ",
+          "name": "Supabase Postgres"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Runs: INSERT": {
+      "main": [
+        []
+      ]
+    },
+    "Upsert Job": {
+      "main": [
+        []
+      ]
+    },
+    "Finalize Run": {
+      "main": [
+        []
+      ]
+    },
+    "Webhook - Start Search": {
+      "main": [
+        []
+      ]
+    },
+    "Runs: INSERT (API)": {
+      "main": [
+        []
+      ]
+    },
+    "Ensure/Upsert Company": {
+      "main": [
+        []
+      ]
+    },
+    "Resolve Company & Org": {
+      "main": [
+        []
+      ]
+    },
+    "Execute a SQL query": {
+      "main": [
+        []
+      ]
+    },
+    "Company Based Job Search": {
+      "main": [
+        []
+      ]
+    },
+    "Generate Message": {
+      "main": [
+        []
+      ]
+    },
+    "Fetch Context": {
+      "main": [
+        []
+      ]
+    },
+    "Upsert Draft": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "bafadd7c38f82cc0637def416a9610ca59f6e497b0644138b409891355d1c45d"
+  }
+}

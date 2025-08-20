@@ -462,6 +462,41 @@ Best regards,
     }
   });
 
+  // API endpoint to resolve company and get contact counts
+  app.get("/api/companies/resolve/:company_name", async (req, res) => {
+    try {
+      const { company_name } = req.params;
+      const { do_contacts, do_jobs } = req.query;
+
+      // Find company by name
+      const [company] = await db
+        .select()
+        .from(companies)
+        .where(eq(companies.name, company_name))
+        .limit(1);
+
+      // Count existing contacts
+      const [contactCount] = company ? await db
+        .select({ count: sql<number>`count(*)` })
+        .from(contacts)
+        .where(eq(contacts.company_id, company.company_id)) : [{ count: 0 }];
+
+      res.json({
+        company_name,
+        company_id: company?.company_id || null,
+        org_id: company?.apollo_org_id || null,
+        domain: company?.domain || null,
+        contacts_total: contactCount.count,
+        do_contacts: do_contacts === 'true',
+        do_jobs: do_jobs === 'true'
+      });
+
+    } catch (error) {
+      console.error("Resolve company error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   const httpServer = createServer(app);
 
   return httpServer;
