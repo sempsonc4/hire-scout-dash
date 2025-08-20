@@ -1,0 +1,39 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH s AS (\n  SELECT\n    $1::text               AS run_id,\n    NULLIF($2::text,'')    AS search_id,\n    $3::text               AS query,\n    $4::jsonb              AS params,\n    NULLIF($4::jsonb->>'location','') AS location,\n    $5::text               AS view_token\n),\nmaybe_search AS (\n  INSERT INTO public.searches (search_id, query, location, params, created_at)\n  SELECT search_id, query, location, params, now()\n  FROM s\n  WHERE search_id IS NOT NULL AND location IS NOT NULL\n  ON CONFLICT (search_id) DO UPDATE\n    SET query    = EXCLUDED.query,\n        location = EXCLUDED.location,\n        params   = EXCLUDED.params\n),\nupsert_run AS (\n  INSERT INTO public.runs\n    (run_id, search_id, query, params, status, stats, view_token, created_at, updated_at)\n  SELECT\n    run_id,\n    CASE WHEN location IS NOT NULL AND search_id IS NOT NULL THEN search_id ELSE NULL END,\n    query,\n    params,\n    'running',\n    '{}'::jsonb,\n    view_token,\n    now(),\n    now()\n  FROM s\n  ON CONFLICT (run_id) DO UPDATE\n    SET\n      search_id  = COALESCE(public.runs.search_id, EXCLUDED.search_id),\n      view_token = COALESCE(public.runs.view_token, EXCLUDED.view_token),\n      updated_at = now()\n  RETURNING public.runs.run_id, public.runs.view_token\n)\nSELECT run_id, view_token FROM upsert_run;\n",
+        "options": {
+          "queryReplacement": "={{ $json.run_id }}, {{ $json.search_id || null }}, {{ $json.query }}, {{ JSON.stringify($json.params || {}) }}, {{ $json.view_token }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1680,
+        80
+      ],
+      "id": "11fb265d-9214-4e5f-bf35-6d3eee2f8462",
+      "name": "Runs: INSERT",
+      "credentials": {
+        "postgres": {
+          "id": "vgUdpMDjCIUzlJSZ",
+          "name": "Supabase Postgres"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Runs: INSERT": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "bafadd7c38f82cc0637def416a9610ca59f6e497b0644138b409891355d1c45d"
+  }
+}

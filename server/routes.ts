@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { db } from "./db";
-import { runs, jobs, contacts, outreach_messages } from "@shared/schema";
+import { runs, jobs, contacts, outreach_messages, companies } from "@shared/schema";
 import { eq, sql, and, like, gte, lte, gt, desc, asc } from "drizzle-orm";
 import crypto from "crypto";
 
