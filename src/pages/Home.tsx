@@ -19,6 +19,49 @@ const Home = () => {
   const [companySearch, setCompanySearch] = useState("");
   const [companyLoading, setCompanyLoading] = useState(false);
 
+  const makeSearchRequest = async (retryCount = 0) => {
+    const params = {
+      location: searchParams.location,
+      max_results: Number(searchParams.maxResults) || 100,
+      max_pages: 10,
+      absolute_max_results: 200,
+      enable_safeguards: true,
+    };
+
+    const form = new URLSearchParams();
+    form.append("query", searchParams.role.trim());
+    form.append("params", JSON.stringify(params));
+
+    const res = await fetch("/webhook/search/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form.toString(),
+    });
+
+    const responseText = await res.text();
+    
+    if (!res.ok) {
+      throw new Error(`Start failed (${res.status}): ${responseText || res.statusText}`);
+    }
+
+    // Try to parse as JSON
+    let data;
+    try {
+      data = JSON.parse(responseText);
+    } catch (parseError) {
+      // If we get HTML instead of JSON and haven't retried yet, try once more
+      if (responseText.includes('<!DOCTYPE html>') && retryCount < 1) {
+        console.warn(`Received HTML response, retrying... (attempt ${retryCount + 1})`);
+        await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
+        return makeSearchRequest(retryCount + 1);
+      }
+      console.error("Response was not JSON:", responseText.substring(0, 200));
+      throw new Error(`Invalid response format. Expected JSON but received: ${responseText.substring(0, 100)}...`);
+    }
+
+    return data;
+  };
+
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!searchParams.role.trim()) return;
@@ -26,41 +69,7 @@ const Home = () => {
     setIsLoading(true);
 
     try {
-      // Build the exact keys the n8n webhook expects
-      const params = {
-        location: searchParams.location,
-        max_results: Number(searchParams.maxResults) || 100,
-        max_pages: 10,
-        absolute_max_results: 200,
-        enable_safeguards: true,
-      };
-
-      const form = new URLSearchParams();
-      form.append("query", searchParams.role.trim());
-      form.append("params", JSON.stringify(params));
-
-      // POST to n8n start endpoint - expect JWT response
-      const res = await fetch("/webhook/search/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: form.toString(),
-      });
-
-      // First get the text response to see what we actually received
-      const responseText = await res.text();
-      
-      if (!res.ok) {
-        throw new Error(`Start failed (${res.status}): ${responseText || res.statusText}`);
-      }
-
-      // Try to parse as JSON
-      let data;
-      try {
-        data = JSON.parse(responseText);
-      } catch (parseError) {
-        console.error("Response was not JSON:", responseText.substring(0, 200));
-        throw new Error(`Invalid response format. Expected JSON but received: ${responseText.substring(0, 100)}...`);
-      }
+      const data = await makeSearchRequest();
       
       // Expect { run_id, search_id, supabase_jwt, exp }
       if (!data.run_id || !data.supabase_jwt) {
