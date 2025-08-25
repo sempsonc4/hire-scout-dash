@@ -35,7 +35,7 @@ const Home = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [searchParams, setSearchParams] = useState({
     role: "",
-    location: "Minneapolis, MN",
+    location: "Minneapolis",
     maxResults: "100",
   });
   const [companySearch, setCompanySearch] = useState("");
