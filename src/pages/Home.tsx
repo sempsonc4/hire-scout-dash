@@ -7,6 +7,28 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Search, Target, MapPin, Hash, Loader2, Building2, List } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
+// Base URL for n8n (set VITE_API_BASE in your frontend env). Fallback keeps you unblocked.
+const API_BASE = ((import.meta.env as any)?.VITE_API_BASE as string | undefined)?.replace(/\/$/, "") ||
+  "https://n8n.srv930021.hstgr.cloud";
+
+// Robust JSON parser: enforces status + content-type and preserves useful error snippets.
+async function parseJsonOrThrow(res: Response) {
+  const ct = (res.headers.get("content-type") || "").toLowerCase();
+  const text = await res.text();
+
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} ${res.statusText}: ${text.slice(0, 300)}`);
+  }
+  if (!ct.includes("application/json")) {
+    throw new Error(`Invalid response format. Expected JSON but received: ${ct || "unknown"}. Snippet: ${text.slice(0, 300)}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Failed to parse JSON. Snippet: ${text.slice(0, 300)}`);
+  }
+}
+
 const Home = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -19,7 +41,7 @@ const Home = () => {
   const [companySearch, setCompanySearch] = useState("");
   const [companyLoading, setCompanyLoading] = useState(false);
 
-  const makeSearchRequest = async (retryCount = 0) => {
+  const makeSearchRequest = async () => {
     const params = {
       location: searchParams.location,
       max_results: Number(searchParams.maxResults) || 100,
@@ -28,37 +50,19 @@ const Home = () => {
       enable_safeguards: true,
     };
 
-    const form = new URLSearchParams();
-    form.append("query", searchParams.role.trim());
-    form.append("params", JSON.stringify(params));
-
-    const res = await fetch("https://n8n.srv930021.hstgr.cloud/webhook/search/start", {
+    const res = await fetch(`${API_BASE}/webhook/search/start`, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: form.toString(),
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+      },
+      body: JSON.stringify({
+        query: searchParams.role.trim(),
+        params,
+      }),
     });
 
-    const responseText = await res.text();
-    
-    if (!res.ok) {
-      throw new Error(`Start failed (${res.status}): ${responseText || res.statusText}`);
-    }
-
-    // Try to parse as JSON
-    let data;
-    try {
-      data = JSON.parse(responseText);
-    } catch (parseError) {
-      // If we get HTML instead of JSON and haven't retried yet, try once more
-      if (responseText.includes('<!DOCTYPE html>') && retryCount < 1) {
-        console.warn(`Received HTML response, retrying... (attempt ${retryCount + 1})`);
-        await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
-        return makeSearchRequest(retryCount + 1);
-      }
-      console.error("Response was not JSON:", responseText.substring(0, 200));
-      throw new Error(`Invalid response format. Expected JSON but received: ${responseText.substring(0, 100)}...`);
-    }
-
+    const data = await parseJsonOrThrow(res);
     return data;
   };
 
@@ -70,23 +74,22 @@ const Home = () => {
 
     try {
       const data = await makeSearchRequest();
-      
+
       // Expect { run_id, search_id, supabase_jwt, exp }
       if (!data.run_id || !data.supabase_jwt) {
         throw new Error("Backend did not return run_id and supabase_jwt");
       }
 
-      // Navigate to results with JWT
       navigate(
         `/results?run_id=${encodeURIComponent(data.run_id)}&role=${encodeURIComponent(
           searchParams.role
         )}&location=${encodeURIComponent(searchParams.location)}`,
-        { 
-          state: { 
-            jwt: data.supabase_jwt, 
+        {
+          state: {
+            jwt: data.supabase_jwt,
             exp: data.exp,
-            searchId: data.search_id 
-          } 
+            searchId: data.search_id,
+          },
         }
       );
     } catch (err: any) {
@@ -108,38 +111,26 @@ const Home = () => {
     setCompanyLoading(true);
 
     try {
-      const res = await fetch("/webhook/company-search/start", {
+      const res = await fetch(`${API_BASE}/webhook/company-search/start`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
         body: JSON.stringify({ company: companySearch.trim() }),
       });
 
-      const responseText = await res.text();
-      
-      if (!res.ok) {
-        throw new Error(`Company search failed (${res.status}): ${responseText || res.statusText}`);
-      }
+      const data = await parseJsonOrThrow(res);
 
-      let data;
-      try {
-        data = JSON.parse(responseText);
-      } catch (parseError) {
-        console.error("Response was not JSON:", responseText.substring(0, 200));
-        throw new Error(`Invalid response format. Expected JSON but received: ${responseText.substring(0, 100)}...`);
-      }
-      
       if (!data.run_id || !data.supabase_jwt) {
         throw new Error("Backend did not return run_id and supabase_jwt");
       }
 
       navigate(
         `/results?run_id=${encodeURIComponent(data.run_id)}&company=${encodeURIComponent(companySearch)}`,
-        { 
-          state: { 
-            jwt: data.supabase_jwt, 
+        {
+          state: {
+            jwt: data.supabase_jwt,
             exp: data.exp,
-            searchId: data.search_id 
-          } 
+            searchId: data.search_id,
+          },
         }
       );
     } catch (err: any) {
@@ -155,7 +146,7 @@ const Home = () => {
   };
 
   const handleBrowseAll = () => {
-    navigate('/results?mode=browse');
+    navigate("/results?mode=browse");
   };
 
   return (
@@ -174,7 +165,6 @@ const Home = () => {
 
       {/* Main Content */}
       <main className="container mx-auto px-4 py-12">
-
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 max-w-6xl mx-auto mb-8">
           {/* Role-based Search */}
           <Card className="shadow-professional-lg">
@@ -296,7 +286,6 @@ const Home = () => {
             </CardContent>
           </Card>
         </div>
-
       </main>
     </div>
   );
