@@ -3,7 +3,7 @@ import { useSearchParams, useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { ArrowLeft, Target, RefreshCw, Loader2, Building2 } from "lucide-react";
+import { ArrowLeft, Target, Loader2, Building2 } from "lucide-react"; // removed RefreshCw
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { createJWTClient } from "@/lib/supabaseClient";
@@ -53,6 +53,7 @@ type LocationState = {
 };
 
 const JOBS_PER_PAGE = 20;
+const POLL_MS = 3000; // fallback polling while run is active
 
 const Results = () => {
   const [searchParams] = useSearchParams();
@@ -282,6 +283,11 @@ const Results = () => {
               newStatus === "completed" ? "completed" :
               newStatus === "failed" ? "failed" : "running";
             setRunStatus(phase);
+            if (phase === "completed") {
+              // final refresh to capture any last rows
+              fetchJobs(1);
+              toast({ title: "Search complete", description: "New jobs have been added." });
+            }
           }
         )
         .on(
@@ -328,6 +334,20 @@ const Results = () => {
       }
     };
   }, [mode, runId, currentPage, fetchJobs, selectedJobId, toast]);
+
+  // 🔄 Fallback polling while the run is active and no jobs have arrived yet
+  // Stops automatically once we have any jobs to display
+  useEffect(() => {
+    if (mode !== "run" || !runId) return;
+    if (runStatus !== "running") return;
+    if (jobs.length > 0) return; // stop polling once initial jobs are present
+
+    const id = setInterval(() => {
+      fetchJobs(currentPage);
+    }, POLL_MS);
+
+    return () => clearInterval(id);
+  }, [mode, runId, runStatus, currentPage, fetchJobs, jobs.length]);
 
   // Fetch jobs on mount / page / filters changes
   useEffect(() => {
@@ -504,14 +524,10 @@ const Results = () => {
           </div>
           <div className="ml-auto flex items-center gap-2">
             <Badge variant={runStatus === "completed" ? "secondary" : runStatus === "failed" ? "destructive" : "default"}>
-              {runStatus === "loading" && <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
+              {(runStatus === "loading" || runStatus === "running") && <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
               {runStatus.charAt(0).toUpperCase() + runStatus.slice(1)}
             </Badge>
-            {runStatus === "running" && (
-              <Button variant="outline" size="sm" onClick={() => fetchJobs(currentPage)}>
-                <RefreshCw className="w-4 h-4" />
-              </Button>
-            )}
+            {/* removed manual refresh button */}
           </div>
         </div>
       );
@@ -530,6 +546,7 @@ const Results = () => {
   })();
 
   const totalPages = Math.ceil(totalCount / JOBS_PER_PAGE);
+  const streamingNoRows = runStatus === "running" && jobs.length === 0;
 
   return (
     <div className="min-h-screen bg-gradient-surface">
@@ -568,12 +585,22 @@ const Results = () => {
                     isLoading={isJobsLoading}
                   />
                 </div>
+
+                {/* Streaming hint */}
+                {runStatus === "running" && (
+                  <div className="px-4 -mt-2 text-sm text-muted-foreground flex items-center gap-2">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Streaming new jobs…
+                  </div>
+                )}
+
                 <div className="flex-1 overflow-hidden px-4 pb-4">
                   <JobsList
                     jobs={jobs}
                     selectedJobId={selectedJobId}
                     onJobSelect={setSelectedJobId}
-                    isLoading={isJobsLoading}
+                    // show spinner while fetch in-flight OR while running with zero rows yet
+                    isLoading={isJobsLoading || streamingNoRows}
                     currentPage={currentPage}
                     totalPages={totalPages}
                     onPageChange={setCurrentPage}
