@@ -32,7 +32,7 @@ const Home = () => {
     form.append("query", searchParams.role.trim());
     form.append("params", JSON.stringify(params));
 
-    const res = await fetch("/webhook/search/start", {
+    const res = await fetch("https://n8n.srv930021.hstgr.cloud/webhook/search/start", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: form.toString(),
