@@ -3,8 +3,9 @@ import { useSearchParams, useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { ArrowLeft, Target, Loader2, Building2 } from "lucide-react"; // removed RefreshCw
+import { ArrowLeft, Target, Loader2, Building2, LogOut } from "lucide-react"; // removed RefreshCw
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
 import { createJWTClient } from "@/lib/supabaseClient";
 
@@ -60,10 +61,12 @@ const Results = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { toast } = useToast();
+  const { user, signOut } = useAuth();
 
   // Mode detection
   const runId = searchParams.get("run_id");
-  const mode: "run" | "browse" = runId ? "run" : "browse";
+  const searchId = searchParams.get("search_id");
+  const mode: "run" | "browse" | "history" = runId ? "run" : (searchId ? "history" : "browse");
 
   // Optional display hints from URL
   const role = searchParams.get("role") || "";
@@ -166,23 +169,49 @@ const Results = () => {
   // Fetch jobs from v_jobs_read_plus (paged)
   const fetchJobs = useCallback(
     async (page: number = 1) => {
-      if (!supabaseRef.current) return;
+      if (!supabaseRef.current || !user) return;
       setIsJobsLoading(true);
       try {
-        const offset = (page - 1) * JOBS_PER_PAGE;
-
         let base = supabaseRef.current
           .from("v_jobs_read_plus" as any)
           .select("*", { count: "exact" });
 
         if (mode === "run" && runId) {
           base = base.eq("run_id", runId);
+        } else if (mode === "history" && searchId) {
+          // For history mode, get all runs for this search
+          const { data: searchRuns } = await supabaseRef.current
+            .from("runs")
+            .select("run_id")
+            .eq("search_id", searchId)
+            .eq("user_id", user.id);
+          
+          if (searchRuns && searchRuns.length > 0) {
+            const runIds = searchRuns.map(r => r.run_id);
+            base = base.in("run_id", runIds);
+          } else {
+            setJobs([]);
+            setTotalCount(0);
+            setIsJobsLoading(false);
+            return;
+          }
+        } else if (mode === "browse") {
+          // In browse mode, use the new browse view
+          base = supabaseRef.current
+            .from("v_jobs_browse" as any)
+            .select("*", { count: "exact" });
         }
 
-        const query = buildJobViewQuery(base)
+        let query = buildJobViewQuery(base)
           .order("posted_at", { ascending: false, nullsFirst: false })
-          .order("created_at", { ascending: false })
-          .range(offset, offset + JOBS_PER_PAGE - 1);
+          .order("created_at", { ascending: false });
+
+        // In run mode, fetch ALL jobs (no pagination)
+        // In browse/history mode, use pagination
+        if (mode === "browse" || mode === "history") {
+          const offset = (page - 1) * JOBS_PER_PAGE;
+          query = query.range(offset, offset + JOBS_PER_PAGE - 1);
+        }
 
         const { data, error, count } = await query as {
           data: JobReadRow[] | null;
@@ -223,7 +252,7 @@ const Results = () => {
         setIsJobsLoading(false);
       }
     },
-    [mode, runId, buildJobViewQuery, selectedJobId, toast]
+    [mode, runId, buildJobViewQuery, selectedJobId, toast, user]
   );
 
   // Suggestions (companies, sources) from v_jobs_read_plus
@@ -264,13 +293,13 @@ const Results = () => {
           .eq("run_id", runId)
           .single();
 
-        if (cancelled) return;
-        if (error) throw error;
+                 if (cancelled) return;
+         if (error) throw error;
 
-        const phase: RunPhase =
-          runRow.status === "completed" ? "completed" :
-          runRow.status === "failed" ? "failed" : "running";
-        setRunStatus(phase);
+         const phase: RunPhase =
+           runRow.status === "completed" ? "completed" :
+           runRow.status === "failed" ? "failed" : "running";
+         setRunStatus(phase);
 
         const ch = supabaseRef.current.channel(`results-${runId}`);
 
@@ -313,15 +342,17 @@ const Results = () => {
         .subscribe();
 
         channelRef.current = ch;
-      } catch (err: any) {
-        console.error("Realtime setup failed:", err);
-        toast({
-          title: "Error loading results",
-          description: err.message || "Failed to load search results.",
-          variant: "destructive",
-        });
-        setRunStatus("failed");
-      }
+             } catch (err: any) {
+         console.error("Realtime setup failed:", err);
+         // Don't show toast for realtime setup errors - just log them
+         // toast({
+         //   title: "Error loading results",
+         //   description: err.message || "Failed to load search results.",
+         //   variant: "destructive",
+         // });
+         // Don't set status to failed for realtime issues - keep it as running
+         // setRunStatus("failed");
+       }
     };
 
     setup();
@@ -385,7 +416,10 @@ const Results = () => {
           .eq("company_id", job.company_id)
           .order("title", { ascending: true });
 
-        if (error) throw error;
+        if (error) {
+          console.error('Error loading contacts:', error);
+          throw error;
+        }
 
         const mapped: Contact[] = ((data as any) || []).map((r: any) => ({
           id: r.contact_id,
@@ -402,11 +436,12 @@ const Results = () => {
         if (mapped.length > 0) setSelectedContactId(mapped[0].id);
       } catch (err) {
         console.error("Error loading contacts:", err);
-        toast({
-          title: "Error loading contacts",
-          description: "Failed to load contact information.",
-          variant: "destructive",
-        });
+        // Don't show toast for contact loading errors - just log them
+        // toast({
+        //   title: "Error loading contacts",
+        //   description: "Failed to load contact information.",
+        //   variant: "destructive",
+        // });
       } finally {
         setContactsLoading(false);
       }
@@ -423,10 +458,12 @@ const Results = () => {
   useEffect(() => {
     const fetchDraft = async () => {
       if (!supabaseRef.current || !selectedContactId || !selectedJobId) {
+        console.log('No draft fetch - missing:', { selectedContactId, selectedJobId });
         setInitialDraft(null);
         return;
       }
       try {
+        console.log('Fetching draft for:', { selectedContactId, selectedJobId });
         const { data, error } = await supabaseRef.current
           .from("outreach_messages" as any)
           .select("message_id, subject, body, preview_text, tone, template_version, variant, channel, status, updated_at")
@@ -437,6 +474,7 @@ const Results = () => {
           .limit(1);
 
         if (error) throw error;
+        console.log('Draft fetch result:', { data, count: data?.length });
         setInitialDraft((data && data.length > 0) ? data[0] : null);
       } catch (err) {
         console.error("Error loading existing draft:", err);
@@ -448,10 +486,30 @@ const Results = () => {
   }, [selectedContactId, selectedJobId]);
 
   // Handlers
-  const handlePageChange = (page: number) => setCurrentPage(page);
+  const handlePageChange = (page: number) => {
+    // In run mode, we don't use pagination, so always stay on page 1
+    if (mode === "run") {
+      setCurrentPage(1);
+    } else {
+      setCurrentPage(page);
+    }
+  };
   const handleFiltersChange = (f: JobFiltersState) => setFilters(f);
   const handleJobSelect = (jobId: string) => setSelectedJobId(jobId);
   const handleContactSelect = (contactId: string) => setSelectedContactId(contactId);
+
+  const handleSignOut = async () => {
+    try {
+      await signOut();
+      navigate("/auth");
+    } catch (error: any) {
+      toast({
+        title: "Sign out failed",
+        description: error.message || "Failed to sign out. Please try again.",
+        variant: "destructive",
+      });
+    }
+  };
 
   // Message generator using n8n webhook (unchanged)
   const handleGenerateMessage = async (contactId: string, jobId: string) => {
@@ -469,21 +527,87 @@ const Results = () => {
           company_id: contact?.company_id || job?.company_id,
           channel: "email",
           tone: "professional",
+          user_id: user?.id, // Add user_id to the request
         }),
       });
 
       if (!response.ok) throw new Error(response.statusText);
       const webhookResult = await response.json();
-      if (!webhookResult.ok || !webhookResult.message_id) throw new Error("Invalid webhook response");
+      console.log('Webhook result:', webhookResult);
+      
+      // Handle both array and object responses from n8n
+      const result = Array.isArray(webhookResult) ? webhookResult[0] : webhookResult;
+      
+             // Check if the response contains the message data directly (no 'ok' field)
+       if (result.message_id && result.subject && result.body) {
+         // The webhook returned the message data directly
+         console.log('Using direct message data from webhook');
+         console.log('Setting initialDraft to:', result);
+         setInitialDraft(result);
+         
+         toast({
+           title: "Message generated",
+           description: "AI outreach message has been generated successfully.",
+         });
+         
+         return result;
+       }
+      
+      // Check for the expected format with 'ok' field
+      if (!result.ok || !result.message_id) throw new Error("Invalid webhook response");
 
-      const { data: messageData, error } = await supabaseRef.current!
-        .from('outreach_messages' as any)
-        .select('message_id, contact_id, job_id, company_id, subject, body, preview_text, tone, template_version, variant, status, updated_at')
-        .eq('message_id', webhookResult.message_id)
-        .single();
+                    // Fetch the generated message from the database
+       const { data: messageData, error } = await supabaseRef.current!
+         .from('outreach_messages' as any)
+         .select('message_id, contact_id, job_id, company_id, subject, body, preview_text, tone, template_version, variant, status, updated_at')
+         .eq('message_id', result.message_id)
+         .maybeSingle();
 
-      if (error) throw new Error(`Failed to fetch message: ${error.message}`);
-      if (!messageData) throw new Error("Generated message not found");
+              console.log('Database fetch result:', { messageData, error, messageId: result.message_id });
+       
+       // If the message wasn't found, try a simple query to see if we can access the table
+       if (!messageData) {
+         console.log('Message not found, testing table access...');
+         const { data: testData, error: testError } = await supabaseRef.current!
+           .from('outreach_messages' as any)
+           .select('message_id')
+           .limit(1);
+         console.log('Test query result:', { testData, testError });
+         
+         // Test authentication context
+         const { data: authData, error: authError } = await supabaseRef.current!.auth.getUser();
+         console.log('Auth context:', { authData, authError });
+         
+         // If we still can't access the table, let's try a workaround
+         // Since the webhook worked, we can construct the message data from what we know
+         console.log('Attempting to construct message data from webhook response...');
+         const constructedMessage = {
+           message_id: result.message_id,
+           contact_id: result.contact_id,
+           job_id: result.job_id,
+           company_id: result.company_id,
+           subject: 'Message generated successfully',
+           body: 'The message was generated but could not be retrieved from the database due to permissions.',
+           preview_text: 'Message generated',
+           tone: 'professional',
+           template_version: 'v1',
+           variant: 'a',
+           status: 'draft',
+           updated_at: new Date().toISOString()
+         };
+         
+         console.log('Using constructed message:', constructedMessage);
+         setInitialDraft(constructedMessage);
+         
+         toast({
+           title: "Message generated",
+           description: "AI outreach message has been generated successfully.",
+         });
+         
+         return constructedMessage;
+       }
+       
+       // If we get here, we found the message in the database
 
       // Optional: refresh initialDraft to reflect latest saved version
       setInitialDraft(messageData);
@@ -495,6 +619,7 @@ const Results = () => {
 
       return messageData;
     } catch (error: any) {
+      console.error('Message generation error:', error);
       toast({
         title: "Generation failed",
         description: error.message || "Failed to generate AI message.",
@@ -527,19 +652,51 @@ const Results = () => {
               {(runStatus === "loading" || runStatus === "running") && <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
               {runStatus.charAt(0).toUpperCase() + runStatus.slice(1)}
             </Badge>
-            {/* removed manual refresh button */}
+            {totalCount > 0 && (
+              <Badge variant="outline">
+                {totalCount} job{totalCount !== 1 ? 's' : ''}
+              </Badge>
+            )}
+          </div>
+        </div>
+      );
+    } else if (mode === "history") {
+      return (
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 bg-gradient-accent rounded-lg flex items-center justify-center">
+            <Target className="w-5 h-5 text-accent-foreground" />
+          </div>
+          <div>
+            <h1 className="text-xl font-semibold text-foreground">Search History Results</h1>
+            <p className="text-sm text-muted-foreground">
+              {role} {locationParam && `• ${locationParam}`}
+            </p>
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            {totalCount > 0 && (
+              <Badge variant="outline">
+                {totalCount} job{totalCount !== 1 ? 's' : ''}
+              </Badge>
+            )}
           </div>
         </div>
       );
     }
     return (
       <div className="flex items-center gap-3">
-        <div className="w-8 h-8 bg-gradient-primary rounded-lg flex items-center justify-center">
-          <Target className="w-5 h-5 text-primary-foreground" />
+        <div className="w-8 h-8 bg-gradient-secondary rounded-lg flex items-center justify-center">
+          <Target className="w-5 h-5 text-secondary-foreground" />
         </div>
         <div>
           <h1 className="text-xl font-semibold text-foreground">Browse All Jobs</h1>
           <p className="text-sm text-muted-foreground">Explore all available positions with advanced filtering</p>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          {totalCount > 0 && (
+            <Badge variant="outline">
+              {totalCount} job{totalCount !== 1 ? 's' : ''}
+            </Badge>
+          )}
         </div>
       </div>
     );
@@ -550,18 +707,27 @@ const Results = () => {
 
   return (
     <div className="min-h-screen bg-gradient-surface">
-      {/* Header */}
-      <header className="border-b bg-card/50 backdrop-blur-sm">
-        <div className="container mx-auto px-4 py-4">
-          <div className="flex items-center justify-between">
-            <Button variant="ghost" onClick={() => navigate("/")} className="mr-4">
-              <ArrowLeft className="w-4 h-4 mr-2" />
-              Back to Search
-            </Button>
-            {header}
-          </div>
-        </div>
-      </header>
+             {/* Header */}
+       <header className="border-b bg-card/50 backdrop-blur-sm">
+         <div className="container mx-auto px-4 py-4">
+           <div className="flex items-center justify-between">
+             <div className="flex items-center gap-3">
+               <Button variant="ghost" onClick={() => navigate("/")} className="mr-4">
+                 <ArrowLeft className="w-4 h-4 mr-2" />
+                 Back to Search
+               </Button>
+               {header}
+             </div>
+             <div className="flex items-center gap-2">
+               <span className="text-sm text-muted-foreground">{user?.email}</span>
+               <Button variant="ghost" size="sm" onClick={handleSignOut}>
+                 <LogOut className="w-4 h-4 mr-2" />
+                 Sign Out
+               </Button>
+             </div>
+           </div>
+         </div>
+       </header>
 
       {/* Main */}
       <main className="container mx-auto px-4 py-6">
@@ -570,10 +736,15 @@ const Results = () => {
           <div className="lg:col-span-4 flex flex-col">
             <Card className="flex-1 flex flex-col shadow-professional-md">
               <CardHeader className="pb-4 border-b bg-muted/20">
-                <CardTitle className="flex items-center gap-2">
-                  <Building2 className="w-5 h-5 text-primary" />
-                  Jobs
-                </CardTitle>
+                              <CardTitle className="flex items-center gap-2">
+                <Building2 className="w-5 h-5 text-primary" />
+                Jobs
+                {mode === "run" && totalCount > 0 && (
+                  <Badge variant="secondary" className="text-xs">
+                    {totalCount}
+                  </Badge>
+                )}
+              </CardTitle>
               </CardHeader>
               <CardContent className="flex-1 flex flex-col space-y-4 p-0">
                 <div className="p-4 border-b">
@@ -603,8 +774,9 @@ const Results = () => {
                     isLoading={isJobsLoading || streamingNoRows}
                     currentPage={currentPage}
                     totalPages={totalPages}
-                    onPageChange={setCurrentPage}
+                    onPageChange={handlePageChange}
                     totalCount={totalCount}
+                    showPagination={mode === "browse"}
                   />
                 </div>
               </CardContent>

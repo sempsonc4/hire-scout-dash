@@ -38,6 +38,7 @@ interface JobsListProps {
   totalPages: number;
   onPageChange: (page: number) => void;
   totalCount: number;
+  showPagination: boolean;
 }
 
 const JobsList = ({
@@ -48,7 +49,8 @@ const JobsList = ({
   currentPage,
   totalPages,
   onPageChange,
-  totalCount
+  totalCount,
+  showPagination
 }: JobsListProps) => {
   
   const formatDate = (dateString?: string) => {
@@ -201,7 +203,7 @@ const JobsList = ({
       </ScrollArea>
 
       {/* Pagination */}
-      {totalPages > 1 && (
+      {showPagination && totalPages > 1 && (
         <div className="flex justify-center items-center gap-2 mt-4 pt-4 border-t">
           <Button
             variant="outline"
